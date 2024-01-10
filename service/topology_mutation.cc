@@ -213,6 +213,13 @@ topology_mutation_builder& topology_mutation_builder::set_new_cdc_generation_dat
     return apply_atomic("new_cdc_generation_data_uuid", value);
 }
 
+topology_mutation_builder& topology_mutation_builder::set_new_keyspace_rf_change_data(
+        const sstring& ks_name, const std::map<sstring, unsigned>& rf_per_dc) {
+    apply_atomic("new_keyspace_rf_change_ks_name", ks_name);
+    apply_atomic("new_keyspace_rf_change_rf_per_dc", rf_per_dc); // TODO: transform into a string
+    return *this;
+}
+
 topology_mutation_builder& topology_mutation_builder::set_unpublished_cdc_generations(const std::vector<cdc::generation_id_v2>& values) {
     auto dv = values | boost::adaptors::transformed([&] (const auto& v) {
         return make_tuple_value(db::cdc_generation_ts_id_type, tuple_type_impl::native_type({v.ts, timeuuid_native_type{v.id}}));

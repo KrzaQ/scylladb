@@ -321,6 +321,7 @@ CREATE TABLE system.topology (
     unpublished_cdc_generations set<tuple<timestamp, timeuuid>> static,
     global_topology_request text static,
     new_cdc_generation_data_uuid timeuuid static,
+    // TODO: extend ks
     PRIMARY KEY (key, host_id)
 )
 ```
@@ -349,6 +350,7 @@ There are also a few static columns for cluster-global properties:
 - `global_topology_request` - if set, contains one of the supported global topology requests
 - `new_cdc_generation_data_uuid` - used in `commit_cdc_generation` state, the time UUID of the generation to be committed
 - `upgrade_state` - describes the progress of the upgrade to raft-based topology.
+// TODO: extend
 
 # Join procedure
 

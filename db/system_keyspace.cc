@@ -230,6 +230,7 @@ schema_ptr system_keyspace::topology() {
             .with_column("supported_features", set_type_impl::get_instance(utf8_type, true))
             .with_column("request_id", timeuuid_type)
             .with_column("new_cdc_generation_data_uuid", timeuuid_type, column_kind::static_column)
+            // TODO: add new columns
             .with_column("version", long_type, column_kind::static_column)
             .with_column("fence_version", long_type, column_kind::static_column)
             .with_column("transition_state", utf8_type, column_kind::static_column)
@@ -2839,6 +2840,8 @@ future<service::topology> system_keyspace::load_topology_state() {
         if (some_row.has("new_cdc_generation_data_uuid")) {
             ret.new_cdc_generation_data_uuid = some_row.get_as<utils::UUID>("new_cdc_generation_data_uuid");
         }
+
+        // TODO: load new data
 
         if (some_row.has("current_cdc_generation_uuid")) {
             auto gen_uuid = some_row.get_as<utils::UUID>("current_cdc_generation_uuid");

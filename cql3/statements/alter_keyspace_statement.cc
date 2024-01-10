@@ -81,14 +81,43 @@ void cql3::statements::alter_keyspace_statement::validate(query_processor& qp, c
 #endif
 }
 
+#include "locator/load_sketch.hh"
+#include "service/topology_guard.hh"
+#include "service/topology_mutation.hh"
+#include "locator/tablet_replication_strategy.hh"
+
 future<std::tuple<::shared_ptr<cql_transport::event::schema_change>, std::vector<mutation>, cql3::cql_warnings_vec>>
 cql3::statements::alter_keyspace_statement::prepare_schema_mutations(query_processor& qp, api::timestamp_type ts) const {
     try {
         auto old_ksm = qp.db().find_keyspace(_name).metadata();
-        const auto& tm = *qp.proxy().get_token_metadata_ptr();
         const auto& feat = qp.proxy().features();
+        const auto& tm = qp.proxy().get_token_metadata_ptr();
+        auto m = service::prepare_keyspace_update_announcement(qp.db().real_database(), _attrs->as_ks_metadata_update(old_ksm, *tm, feat), ts);
 
-        auto m = service::prepare_keyspace_update_announcement(qp.db().real_database(), _attrs->as_ks_metadata_update(old_ksm, tm, feat), ts);
+        auto&& replication_strategy = qp.db().find_keyspace(_name).get_replication_strategy();
+        if (replication_strategy.uses_tablets()) {
+            // TODO: check if new RF differs by at most 1 from the old RF. Fail the query otherwise
+
+            // Check if topology_state_machine handles other global request
+            // TODO: - #include topology_state_machine to this module
+            if (topology_state_machine._topology.global_request) // TODO: refactor this check into a separate function
+            {
+                // TODO: make this function accept group0_guard instead of timestamp_type
+                //       this will require changing signature in the whole class hierarchy
+                service::group0_guard guard;
+                service::topology_mutation_builder builder(guard.write_timestamp());
+                builder.set_global_topology_request(service::global_topology_request::keyspace_rf_change);
+                builder.set_keyspace_rf_change_data(_name, rf_per_dc); // TODO: implement
+                service::topology_change change{{builder.build()}};
+                std::move(change.mutations.begin(), change.mutations.end(), std::back_inserter(m));
+            }
+            else {
+                // TODO: before returning, wait until the current global topology request is done. Blocker: #16374
+                return make_exception_future<std::tuple<::shared_ptr<cql_transport::event::schema_change>, std::vector<mutation>, cql3::cql_warnings_vec>>(
+                        exceptions::invalid_request_exception(
+                                "topology mutation cannot be performed while other request is ongoing"));
+            }
+        }
 
         using namespace cql_transport;
         auto ret = ::make_shared<event::schema_change>(
