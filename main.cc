@@ -1417,7 +1417,8 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             supervisor::notify("initializing query processor remote part");
             // TODO: do this together with proxy.start_remote(...)
-            qp.invoke_on_all(&cql3::query_processor::start_remote, std::ref(mm), std::ref(forward_service), std::ref(group0_client)).get();
+            qp.invoke_on_all(&cql3::query_processor::start_remote, std::ref(mm), std::ref(forward_service),
+                             std::ref(ss), std::ref(group0_client)).get();
             auto stop_qp_remote = defer_verbose_shutdown("query processor remote part", [&qp] {
                 qp.invoke_on_all(&cql3::query_processor::stop_remote).get();
             });

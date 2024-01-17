@@ -149,7 +149,8 @@ public:
 
     ~query_processor();
 
-    void start_remote(service::migration_manager&, service::forward_service&, service::raft_group0_client&);
+    void start_remote(service::migration_manager&, service::forward_service&,
+                      service::storage_service& ss, service::raft_group0_client&);
     future<> stop_remote();
 
     data_dictionary::database db() {
@@ -444,6 +445,8 @@ public:
     void update_authorized_prepared_cache_config();
 
     void reset_cache();
+
+    bool global_topology_queue_empty();
 
 private:
     // Keep the holder until you stop using the `remote` services.

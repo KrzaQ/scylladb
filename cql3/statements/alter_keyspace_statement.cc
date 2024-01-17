@@ -84,6 +84,7 @@ void cql3::statements::alter_keyspace_statement::validate(query_processor& qp, c
 #include "locator/load_sketch.hh"
 #include "service/topology_guard.hh"
 #include "service/topology_mutation.hh"
+#include "service/storage_service.hh"
 #include "locator/tablet_replication_strategy.hh"
 
 future<std::tuple<::shared_ptr<cql_transport::event::schema_change>, std::vector<mutation>, cql3::cql_warnings_vec>>
@@ -100,8 +101,10 @@ cql3::statements::alter_keyspace_statement::prepare_schema_mutations(query_proce
 
             // Check if topology_state_machine handles other global request
             // TODO: - #include topology_state_machine to this module
+            qp.remote().first.get()->
             if (topology_state_machine._topology.global_request) // TODO: refactor this check into a separate function
             {
+                auto topology = qp.proxy().get_token_metadata_ptr()->get_topology_change_info();
                 // TODO: make this function accept group0_guard instead of timestamp_type
                 //       this will require changing signature in the whole class hierarchy
                 service::group0_guard guard;
