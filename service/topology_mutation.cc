@@ -216,7 +216,7 @@ topology_mutation_builder& topology_mutation_builder::set_new_cdc_generation_dat
 topology_mutation_builder& topology_mutation_builder::set_new_keyspace_rf_change_data(
         const sstring& ks_name, const std::map<sstring, unsigned>& rf_per_dc) {
     apply_atomic("new_keyspace_rf_change_ks_name", ks_name);
-    apply_atomic("new_keyspace_rf_change_rf_per_dc", rf_per_dc); // TODO: transform into a string
+//    apply_atomic("new_keyspace_rf_change_rf_per_dc", rf_per_dc); // TODO: transform into a string
     return *this;
 }
 

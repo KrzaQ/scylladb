@@ -27,6 +27,7 @@
 #include "utils/hashers.hh"
 #include "utils/error_injection.hh"
 #include "service/migration_manager.hh"
+#include "service/storage_service.hh"
 
 namespace cql3 {
 
@@ -48,10 +49,14 @@ struct query_processor::remote {
 
     service::migration_manager& mm;
     service::forward_service& forwarder;
-    service::raft_group0_client& group0_client;
     service::storage_service& ss;
+    service::raft_group0_client& group0_client;
     seastar::gate gate;
 };
+
+bool query_processor::topology_global_queue_empty() {
+    return remote().first.get().ss.topology_global_queue_empty();
+}
 
 static service::query_state query_state_for_internal_call() {
     return {service::client_state::for_internal_calls(), empty_service_permit()};
@@ -510,14 +515,6 @@ future<> query_processor::stop_remote() {
 
     co_await _remote->gate.close();
     _remote = nullptr;
-}
-
-#include "service/storage_service.hh"
-
-bool query_processor::global_topology_queue_empty() {
-    auto [remote_, _] = remote();
-    remote_.get().ss.;
-    return true;
 }
 
 future<> query_processor::stop() {

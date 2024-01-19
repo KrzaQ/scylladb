@@ -446,7 +446,7 @@ public:
 
     void reset_cache();
 
-    bool global_topology_queue_empty();
+    bool topology_global_queue_empty();
 
 private:
     // Keep the holder until you stop using the `remote` services.
