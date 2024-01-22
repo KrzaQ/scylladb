@@ -14,16 +14,19 @@
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/log.hh"
 #include "db/config.hh"
+#include "db/schema_tables.hh"
 #include "schema/schema_builder.hh"
 
 #include "replica/tablets.hh"
 #include "replica/tablet_mutation_builder.hh"
 #include "locator/tablets.hh"
 #include "service/tablet_allocator.hh"
+#include "locator/tablet_replication_strategy.hh"
 #include "locator/tablet_sharder.hh"
 #include "locator/load_sketch.hh"
 #include "utils/UUID_gen.hh"
 #include "utils/error_injection.hh"
+#include "service/topology_coordinator.hh"
 
 using namespace locator;
 using namespace replica;
@@ -1737,4 +1740,167 @@ SEASTAR_THREAD_TEST_CASE(test_load_balancing_resize_requests) {
             BOOST_REQUIRE(std::holds_alternative<locator::resize_decision::none>(resize_decision().way));
         }
     }).get();
+}
+
+static locator::endpoint_dc_rack make_endpoint_dc_rack(gms::inet_address endpoint) {
+    // This resembles rack_inferring_snitch dc/rack generation which is
+    // still in use by this test via token_metadata internals
+    auto dc = std::to_string(uint8_t(endpoint.bytes()[1]));
+    auto rack = std::to_string(uint8_t(endpoint.bytes()[2]));
+    return locator::endpoint_dc_rack{dc, rack};
+}
+
+SEASTAR_THREAD_TEST_CASE(test_reallocate_tablets_for_new_rf) {
+    auto my_address = gms::inet_address("localhost");
+    // Create the RackInferringSnitch
+    snitch_config cfg;
+    cfg.listen_address = my_address;
+    cfg.broadcast_address = my_address;
+    cfg.name = "RackInferringSnitch";
+    sharded<snitch_ptr> snitch;
+    snitch.start(cfg).get();
+    auto stop_snitch = defer([&snitch] { snitch.stop().get(); });
+    snitch.invoke_on_all(&snitch_ptr::start).get();
+
+    static constexpr size_t tablet_count = 8;
+
+    struct ring_point {
+        double point;
+        inet_address host;
+        host_id id = host_id::create_random_id();
+    };
+
+    auto double_to_int64_t = [](double d) -> int64_t {
+        // Double to unsigned long conversion will overflow if the
+        // input is greater than numeric_limits<long>::max(), so divide by two and
+        // multiply again later.
+        auto scale = std::numeric_limits<unsigned long>::max();
+        return static_cast<unsigned long>(d * static_cast<double>(scale >> 1)) << 1;
+    };
+
+    std::vector<ring_point> ring_points = {
+            { 1.0,  inet_address("192.100.10.1") },
+            { 2.0,  inet_address("192.101.10.1") },
+            { 3.0,  inet_address("192.102.10.1") },
+            { 4.0,  inet_address("192.100.20.1") },
+            { 5.0,  inet_address("192.101.20.1") },
+            { 6.0,  inet_address("192.102.20.1") },
+            { 7.0,  inet_address("192.100.30.1") },
+            { 8.0,  inet_address("192.101.30.1") },
+            { 9.0,  inet_address("192.102.30.1") },
+            { 10.0, inet_address("192.102.40.1") },
+            { 11.0, inet_address("192.102.40.2") }
+    };
+
+    std::vector<unsigned> nodes_shard_count(ring_points.size(), 3);
+
+    locator::token_metadata::config tm_cfg;
+    tm_cfg.topo_cfg.this_endpoint = ring_points[0].host;
+    tm_cfg.topo_cfg.local_dc_rack = { snitch.local()->get_datacenter(), snitch.local()->get_rack() };
+    tm_cfg.topo_cfg.this_host_id = ring_points[0].id;
+    locator::shared_token_metadata stm([] () noexcept { return db::schema_tables::hold_merge_lock(); }, tm_cfg);
+
+    // Initialize the token_metadata
+    stm.mutate_token_metadata([&] (token_metadata& tm) -> future<> {
+        auto& topo = tm.get_topology();
+        for (const auto& [ring_point, endpoint, id] : ring_points) {
+            std::unordered_set<token> tokens;
+            tokens.insert({dht::token::kind::key, double_to_int64_t(ring_point / ring_points.size())});
+            topo.add_node(id, endpoint, make_endpoint_dc_rack(endpoint), locator::node::state::normal, 1);
+            tm.update_host_id(id, endpoint);
+            co_await tm.update_normal_tokens(std::move(tokens), id);
+        }
+    }).get();
+
+    std::map<sstring, sstring> options323 = {
+        {"100", "3"},
+        {"101", "2"},
+        {"102", "3"}
+    };
+    locator::replication_strategy_params params323(options323, tablet_count);
+
+    auto ars_ptr = abstract_replication_strategy::create_replication_strategy(
+        "NetworkTopologyStrategy", params323);
+
+    auto tablet_aware_ptr = ars_ptr->maybe_as_tablet_aware();
+    BOOST_REQUIRE(tablet_aware_ptr);
+
+    auto s = schema_builder("ks", "tb")
+        .with_column("pk", utf8_type, column_kind::partition_key)
+        .with_column("v", utf8_type)
+        .build();
+
+    std::unordered_map<sstring, size_t> const& new_dc_rep_factor = {
+        {"100", 3},
+        {"101", 4},
+        {"102", 2}
+    };
+
+    stm.mutate_token_metadata([&] (token_metadata& tm) {
+        for (size_t i = 0; i < ring_points.size(); ++i) {
+            auto& [ring_point, endpoint, id] = ring_points[i];
+            tm.update_host_id(id, endpoint);
+            tm.update_topology(id, make_endpoint_dc_rack(endpoint), std::nullopt, nodes_shard_count[i]);
+        }
+        return make_ready_future<>();
+    }).get();
+
+    auto allocated_map = tablet_aware_ptr->allocate_tablets_for_new_table(s, stm.get(), 0).get0();
+
+    BOOST_REQUIRE_EQUAL(allocated_map.tablet_count(), tablet_count);
+
+    auto host_id_to_dc = [&stm](const locator::host_id& ep) -> std::optional<sstring> {
+        auto node = stm.get()->get_topology().find_node(ep);
+        if (node == nullptr) {
+            return std::nullopt;
+        }
+        return node->dc_rack().dc;
+    };
+
+    stm.mutate_token_metadata([&] (token_metadata& tm) {
+        tablet_metadata tab_meta;
+        auto table = s->id();
+        tab_meta.set_tablet_map(table, allocated_map);
+        tm.set_tablets(std::move(tab_meta));
+        return make_ready_future<>();
+    }).get();
+
+    auto tablets = stm.get()->tablets().get_tablet_map(s->id());
+    BOOST_REQUIRE_EQUAL(tablets.tablet_count(), tablet_count);
+    for (auto tb : tablets.tablet_ids()) {
+        const locator::tablet_info& ti = tablets.get_tablet_info(tb);
+
+        std::unordered_map<sstring, size_t> expected_rep_factor;
+        for (const auto& r : options323) {
+            expected_rep_factor[r.first] = std::stoi(r.second);
+        }
+        std::unordered_map<sstring, size_t> dc_replicas_count;
+        for (const auto& r : ti.replicas) {
+            auto dc = host_id_to_dc(r.host);
+            if (dc) {
+                dc_replicas_count[*dc]++;
+            }
+        }
+
+        BOOST_REQUIRE_EQUAL(dc_replicas_count, expected_rep_factor);
+    }
+
+    auto tmap = service::reallocate_tablets_for_new_rf(s, stm.get(), new_dc_rep_factor).get();
+    auto const& ts = tmap.tablets();
+
+    BOOST_CHECK_EQUAL(ts.size(), tablet_count);
+
+    for (auto tb : tmap.tablet_ids()) {
+        const locator::tablet_info& ti = tmap.get_tablet_info(tb);
+
+        std::unordered_map<sstring, size_t> dc_replicas_count;
+        for (const auto& r : ti.replicas) {
+            auto dc = host_id_to_dc(r.host);
+            if (dc) {
+                dc_replicas_count[*dc]++;
+            }
+        }
+
+        BOOST_REQUIRE_EQUAL(dc_replicas_count, new_dc_rep_factor);
+    }
 }
