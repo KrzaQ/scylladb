@@ -710,6 +710,32 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
         case global_topology_request::cleanup:
             co_await start_cleanup_on_dirty_nodes(std::move(guard), true);
             break;
+        case global_topology_request::keyspace_rf_change: {
+/*            slogger.info("raft topology: new keyspace RF change requested");
+            auto tmptr = get_token_metadata_ptr();
+            auto ks_name = _topo_sm._topology.new_keyspace_rf_change_ks_name;
+            auto rf_per_dc = _topo_sm._topology.new_keyspace_rf_change_rf_per_dc;
+
+            locator::tablet_map tablets = tmptr->tablets().get_tablet_map(schema_ptr{}->id());
+            const auto& dcs = tmptr->get_topology().get_datacenters();
+            for (auto tablet : ks_tablets) {
+                tablet_id = tablet.id();
+                locator::tablet_replica_set replicas = tablets.get_tablet_info(tablet_id).replicas;
+                // TODO: should be based on network_topology_strategy::allocate_tablets_for_new_table, basically:
+                // When new RF < old RF, take the most loaded endpoints from load_sketch and drop extra redundant replicas from these endpoints
+                // Otherwise add new replicas from the least loaded endpoints
+                slogger.debug("Allocated tablets for {}.{} ({}): {}", s->ks_name(), s->cf_name(), s->id(), tablets);
+                tablet_transition_info transition{ .next = replicas };
+                tablets.set_tablet_transition_info(tablet_id, transition);
+            }
+            topology_mutation_builder builder(guard.write_timestamp());
+            builder.set_transition_state(topology::transition_state::tablet_migration);
+            auto reason = ::format(
+                    "insert keyspace RF change data (ks name: {}, new RF per DC: {})", ks_name, rf_per_dc);
+            co_await update_topology_state(std::move(guard), {std::move(mutation), builder.build()}, reason);
+*/            break;
+        }
+
         }
     }
 
