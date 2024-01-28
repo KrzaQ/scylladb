@@ -54,8 +54,8 @@ struct query_processor::remote {
     seastar::gate gate;
 };
 
-bool query_processor::topology_global_queue_empty() {
-    return remote().first.get().ss.topology_global_queue_empty();
+future<> query_processor::alter_tablets_keyspace() {
+    return remote().first.get().ss.alter_tablets_keyspace();
 }
 
 static service::query_state query_state_for_internal_call() {

@@ -24,6 +24,7 @@ enum class stream_reason : uint8_t {
     replace,
     tablet_migration,
     tablet_rebuild,
+    rf_change,
 };
 
 }

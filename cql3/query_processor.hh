@@ -446,7 +446,7 @@ public:
 
     void reset_cache();
 
-    bool topology_global_queue_empty();
+    future<> alter_tablets_keyspace();
 
 private:
     // Keep the holder until you stop using the `remote` services.
