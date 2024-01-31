@@ -305,7 +305,7 @@ tablet_transition_stage tablet_transition_stage_from_string(const sstring& name)
 static const std::unordered_map<tablet_transition_kind, sstring> tablet_transition_kind_to_name = {
         {tablet_transition_kind::migration, "migration"},
         {tablet_transition_kind::rebuild, "rebuild"},
-        {tablet_transition_kind::rebuild, "rf_change"},
+        {tablet_transition_kind::rf_change, "rf_change"},
 };
 
 static const std::unordered_map<sstring, tablet_transition_kind> tablet_transition_kind_from_name = std::invoke([] {

@@ -51,6 +51,7 @@ struct query_processor::remote {
     service::forward_service& forwarder;
     service::storage_service& ss;
     service::raft_group0_client& group0_client;
+
     seastar::gate gate;
 };
 

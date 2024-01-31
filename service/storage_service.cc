@@ -3223,44 +3223,6 @@ future<> storage_service::raft_decommission() {
         throw std::runtime_error(err);
     }
 }
-}
-// TODO: remove. It's currently needed to throw cql3 exception if topology_global_queue_empty() == true
-#include "cql3/cql_statement.hh"
-namespace service {
-future<> storage_service::alter_tablets_keyspace() {
-    utils::UUID request_id;
-    if (this_shard_id() != 0) {
-        co_return;
-    }
-
-    while (true) {
-        if (!topology_global_queue_empty()) {
-            auto guard = co_await _group0->client().start_operation(&_group0_as);
-            request_id = guard.new_group0_state_id();
-
-            topology_mutation_builder builder(guard.write_timestamp());
-            builder.set_global_topology_request(global_topology_request::keyspace_rf_change);
-//            builder.set_keyspace_rf_change_data(_name, rf_per_dc); // TODO: implement
-            topology_change change{{builder.build()}};
-
-            group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard, "alter_tablets_keyspace");
-            try {
-                co_await _group0->client().add_entry(std::move(g0_cmd), std::move(guard), &_abort_source);
-                break;
-            } catch (group0_concurrent_modification &) {
-                rtlogger.info("alter_tablets_keyspace: concurrent modification, retrying");
-            }
-        } else {
-            throw make_exception_future<std::tuple<::shared_ptr<::cql_transport::event::schema_change>, std::vector<mutation>, cql3::cql_warnings_vec>>(
-                exceptions::invalid_request_exception("alter_tablets_keyspace: topology mutation cannot be performed while other request is ongoing"));
-        }
-    }
-    auto error = co_await wait_for_topology_request_completion(request_id);
-
-    if (!error.empty()) {
-        throw std::runtime_error(fmt::format("alter_tablets_keyspace failed. See earlier errors ({})", error));
-    }
-}
 
 future<> storage_service::decommission() {
     return run_with_api_lock(sstring("decommission"), [] (storage_service& ss) {
@@ -5383,7 +5345,6 @@ future<> storage_service::stream_tablet(locator::global_tablet_id tablet) {
             switch (trinfo->transition) {
                 case locator::tablet_transition_kind::migration: return streaming::stream_reason::tablet_migration;
                 case locator::tablet_transition_kind::rebuild: return streaming::stream_reason::rebuild;
-                case locator::tablet_transition_kind::rf_change: return streaming::stream_reason::rf_change;
                 default:
                     throw std::runtime_error(fmt::format("stream_tablet(): Invalid tablet transition: {}", trinfo->transition));
             }
@@ -5576,6 +5537,44 @@ future<> storage_service::move_tablet(table_id table, dht::token token, locator:
         return !tmap.get_tablet_transition_info(tmap.get_tablet_id(token));
     });
 }
+}
+// TODO: remove this header. It's currently needed to throw cql3 exception if topology_global_queue_empty() == true
+#include "cql3/cql_statement.hh"
+namespace service {
+    future<> storage_service::alter_tablets_keyspace() {
+        utils::UUID request_id;
+        if (this_shard_id() != 0) {
+            co_return;
+        }
+
+        while (true) {
+            if (!topology_global_queue_empty()) {
+                auto guard = co_await _group0->client().start_operation(&_group0_as);
+                request_id = guard.new_group0_state_id();
+
+                topology_mutation_builder builder(guard.write_timestamp());
+                builder.set_global_topology_request(global_topology_request::keyspace_rf_change);
+//            builder.set_keyspace_rf_change_data(_name, rf_per_dc); // TODO: implement
+                topology_change change{{builder.build()}};
+
+                group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard, "alter_tablets_keyspace");
+                try {
+                    co_await _group0->client().add_entry(std::move(g0_cmd), std::move(guard), &_abort_source);
+                    break;
+                } catch (group0_concurrent_modification &) {
+                    rtlogger.info("alter_tablets_keyspace: concurrent modification, retrying");
+                }
+            } else {
+                throw make_exception_future<std::tuple<::shared_ptr<::cql_transport::event::schema_change>, std::vector<mutation>, cql3::cql_warnings_vec>>(
+                        exceptions::invalid_request_exception("alter_tablets_keyspace: topology mutation cannot be performed while other request is ongoing"));
+            }
+        }
+        auto error = co_await wait_for_topology_request_completion(request_id);
+
+        if (!error.empty()) {
+            throw std::runtime_error(fmt::format("alter_tablets_keyspace failed with: {}", error));
+        }
+    }
 
 future<locator::load_stats> storage_service::load_stats_for_tablet_based_tables() {
     auto holder = _async_gate.hold();

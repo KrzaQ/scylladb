@@ -951,9 +951,6 @@ future<> migration_manager::announce_with_raft(std::vector<mutation> schema, gro
     auto schema_features = _feat.cluster_schema_features();
     auto adjusted_schema = db::schema_tables::adjust_schema_for_schema_features(std::move(schema), schema_features);
 
-    // we have access to group0 client here, so global_topology_request::keyspace_rf_change
-    // will be executed under group0 out of the box (?)
-
     auto group0_cmd = _group0_client.prepare_command(
         schema_change{
             .mutations{adjusted_schema.begin(), adjusted_schema.end()},

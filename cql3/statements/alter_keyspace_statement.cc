@@ -81,6 +81,7 @@ void cql3::statements::alter_keyspace_statement::validate(query_processor& qp, c
 #endif
 }
 
+// TODO: remove unnecessary headers, move others to the top of the file (once the PR compiles)
 #include "locator/load_sketch.hh"
 #include "service/topology_guard.hh"
 #include "service/topology_mutation.hh"
@@ -91,9 +92,10 @@ future<std::tuple<::shared_ptr<cql_transport::event::schema_change>, std::vector
 cql3::statements::alter_keyspace_statement::prepare_schema_mutations(query_processor& qp, api::timestamp_type ts) const {
     try {
         auto old_ksm = qp.db().find_keyspace(_name).metadata();
+        const auto& tm = *qp.proxy().get_token_metadata_ptr();
         const auto& feat = qp.proxy().features();
-        const auto& tm = qp.proxy().get_token_metadata_ptr();
-        auto m = service::prepare_keyspace_update_announcement(qp.db().real_database(), _attrs->as_ks_metadata_update(old_ksm, *tm, feat), ts);
+
+        auto m = service::prepare_keyspace_update_announcement(qp.db().real_database(), _attrs->as_ks_metadata_update(old_ksm, tm, feat), ts);
 
         using namespace cql_transport;
         auto ret = ::make_shared<event::schema_change>(

@@ -321,7 +321,7 @@ CREATE TABLE system.topology (
     unpublished_cdc_generations set<tuple<timestamp, timeuuid>> static,
     global_topology_request text static,
     new_cdc_generation_data_uuid timeuuid static,
-    // TODO: extend ks
+    // TODO: add new column
     PRIMARY KEY (key, host_id)
 )
 ```
