@@ -446,7 +446,7 @@ public:
 
     void reset_cache();
 
-    future<> alter_tablets_keyspace();
+    future<> alter_tablets_keyspace(sstring ks_name, std::map<sstring, sstring> replication_options);
 
 private:
     // Keep the holder until you stop using the `remote` services.

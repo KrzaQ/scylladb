@@ -713,20 +713,27 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
         case global_topology_request::keyspace_rf_change: {
             rtlogger.info("raft topology: new keyspace RF change requested");
             auto tmptr = get_token_metadata_ptr();
-            sstring ks_name; // = _topo_sm._topology.new_keyspace_rf_change_ks_name;
-            std::map<sstring, unsigned> rf_per_dc; // = _topo_sm._topology.new_keyspace_rf_change_rf_per_dc;
-            for(auto table : _db.find_keyspace(ks_name).metadata()->tables()) {
+            sstring ks_name = *_topo_sm._topology.new_keyspace_rf_change_ks_name;
+            std::map<sstring, sstring> rf_per_dc = *_topo_sm._topology.new_keyspace_rf_change_rf_per_dc;
+            std::vector<canonical_mutation> updates;
+            for (auto table : _db.find_keyspace(ks_name).metadata()->tables()) {
                 locator::tablet_map tablets = tmptr->tablets().get_tablet_map(table->id());
-//            const auto& dcs = tmptr->get_topology().get_datacenters();
+                // const auto& dcs = tmptr->get_topology().get_datacenters();
                 for (auto tablet: tablets.tablets()) {
                     locator::tablet_replica_set replicas = tablet.replicas;
                     // TODO: should be based on network_topology_strategy::allocate_tablets_for_new_table, basically:
                     // When new RF < old RF, take the most loaded endpoints from load_sketch and drop extra redundant replicas from these endpoints
                     // Otherwise add new replicas from the least loaded endpoints
-                    rtlogger.debug("Allocated tablets for {}.{} ({})", ks_name, table->cf_name(), tablet_id);
-                    // TODO: fill in tablet_transition_info
+                    // rtlogger.debug("TODO: Reallocated tablet for {}.{}", ks_name, table->cf_name());
+                    // TODO: properly generate mutations, this is blocked on the above
                     locator::tablet_transition_info transition{.next = replicas, .transition = locator::tablet_transition_kind::rf_change};
                     tablets.set_tablet_transition_info(tablet_id, transition);
+                    updates.push_back(canonical_mutation(replica::tablet_mutation_builder(guard.write_timestamp(), table)
+                                                 .set_new_replicas(last_token, locator::replace_replica(tinfo.replicas, src, dst))
+                                                 .set_stage(last_token, locator::tablet_transition_stage::allow_write_both_read_old)
+                                                 .set_transition(last_token, locator::tablet_transition_kind::migration)
+                                                 .build()));
+
                 }
                 topology_mutation_builder builder(guard.write_timestamp());
                 builder.set_transition_state(topology::transition_state::tablet_migration);

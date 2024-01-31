@@ -5541,7 +5541,7 @@ future<> storage_service::move_tablet(table_id table, dht::token token, locator:
 // TODO: remove this header. It's currently needed to throw cql3 exception if topology_global_queue_empty() == true
 #include "cql3/cql_statement.hh"
 namespace service {
-    future<> storage_service::alter_tablets_keyspace() {
+    future<> storage_service::alter_tablets_keyspace(sstring ks_name, std::map<sstring, sstring> replication_options) {
         utils::UUID request_id;
         if (this_shard_id() != 0) {
             co_return;
@@ -5554,7 +5554,7 @@ namespace service {
 
                 topology_mutation_builder builder(guard.write_timestamp());
                 builder.set_global_topology_request(global_topology_request::keyspace_rf_change);
-//            builder.set_keyspace_rf_change_data(_name, rf_per_dc); // TODO: implement
+                builder.set_new_keyspace_rf_change_data(ks_name, replication_options);
                 topology_change change{{builder.build()}};
 
                 group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard, "alter_tablets_keyspace");

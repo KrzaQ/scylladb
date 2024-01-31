@@ -55,8 +55,8 @@ struct query_processor::remote {
     seastar::gate gate;
 };
 
-future<> query_processor::alter_tablets_keyspace() {
-    return remote().first.get().ss.alter_tablets_keyspace();
+future<> query_processor::alter_tablets_keyspace(sstring ks_name, std::map<sstring, sstring> replication_options) {
+    return remote().first.get().ss.alter_tablets_keyspace(ks_name, replication_options);
 }
 
 static service::query_state query_state_for_internal_call() {

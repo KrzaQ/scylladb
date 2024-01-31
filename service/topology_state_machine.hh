@@ -163,7 +163,9 @@ struct topology {
     // It's used as the first column of the clustering key in CDC_GENERATIONS_V3 table.
     std::optional<utils::UUID> new_cdc_generation_data_uuid;
 
-    // TODO: add new fields
+    // TODO: provide descriptions
+    std::optional<sstring> new_keyspace_rf_change_ks_name;
+    std::optional<std::map<sstring, sstring>> new_keyspace_rf_change_rf_per_dc;
 
     // The IDs of the committed yet unpublished CDC generations sorted by timestamps.
     std::vector<cdc::generation_id_v2> unpublished_cdc_generations;

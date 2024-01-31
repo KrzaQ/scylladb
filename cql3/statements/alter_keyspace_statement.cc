@@ -123,7 +123,7 @@ cql3::statements::alter_keyspace_statement::execute(query_processor& qp, service
     auto&& replication_strategy = qp.db().find_keyspace(_name).get_replication_strategy();
     if (replication_strategy.uses_tablets()) {
         // TODO: check if new RF differs by at most 1 from the old RF. Fail the query otherwise
-        qp.alter_tablets_keyspace().get();
+        qp.alter_tablets_keyspace(_name, _attrs->get_replication_options()).get();
     }
     return schema_altering_statement::execute(qp, state, options, std::move(guard)).then(
             [warnings = std::move(warnings)](::shared_ptr<messages::result_message> msg) {

@@ -845,7 +845,7 @@ public:
     future<> topology_transition();
 
     future<> do_cluster_cleanup();
-    future<> alter_tablets_keyspace();
+    future<> alter_tablets_keyspace(sstring ks_name, std::map<sstring, sstring> replication_options);
 
     // Starts the upgrade procedure to topology on raft.
     // Must be called on shard 0.
