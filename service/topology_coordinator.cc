@@ -683,6 +683,12 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
         }
     }
 
+    future<locator::tablet_map> reallocate_tablets_for_new_rf(schema_ptr s, locator::token_metadata_ptr tm,
+                                                              std::map<sstring, sstring> new_rf_per_dc) {
+        // TODO: include https://github.com/scylladb/scylladb/pull/17116
+        co_return locator::tablet_map{8};
+    }
+
     // Precondition: there is no node request and no ongoing topology transition
     // (checked under the guard we're holding).
     future<> handle_global_request(group0_guard guard) {
@@ -711,39 +717,50 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
             co_await start_cleanup_on_dirty_nodes(std::move(guard), true);
             break;
         case global_topology_request::keyspace_rf_change: {
-            rtlogger.info("raft topology: new keyspace RF change requested");
-            auto tmptr = get_token_metadata_ptr();
-            sstring ks_name = *_topo_sm._topology.new_keyspace_rf_change_ks_name;
-            std::map<sstring, sstring> rf_per_dc = *_topo_sm._topology.new_keyspace_rf_change_rf_per_dc;
-            std::vector<canonical_mutation> updates;
-            for (auto table : _db.find_keyspace(ks_name).metadata()->tables()) {
-                locator::tablet_map tablets = tmptr->tablets().get_tablet_map(table->id());
-                // const auto& dcs = tmptr->get_topology().get_datacenters();
-                for (auto tablet: tablets.tablets()) {
-                    locator::tablet_replica_set replicas = tablet.replicas;
-                    // TODO: should be based on network_topology_strategy::allocate_tablets_for_new_table, basically:
-                    // When new RF < old RF, take the most loaded endpoints from load_sketch and drop extra redundant replicas from these endpoints
-                    // Otherwise add new replicas from the least loaded endpoints
-                    // rtlogger.debug("TODO: Reallocated tablet for {}.{}", ks_name, table->cf_name());
-                    // TODO: properly generate mutations, this is blocked on the above
-                    locator::tablet_transition_info transition{.next = replicas, .transition = locator::tablet_transition_kind::rf_change};
-                    tablets.set_tablet_transition_info(tablet_id, transition);
-                    updates.push_back(canonical_mutation(replica::tablet_mutation_builder(guard.write_timestamp(), table)
-                                                 .set_new_replicas(last_token, locator::replace_replica(tinfo.replicas, src, dst))
-                                                 .set_stage(last_token, locator::tablet_transition_stage::allow_write_both_read_old)
-                                                 .set_transition(last_token, locator::tablet_transition_kind::migration)
-                                                 .build()));
+            while (true) {
+                rtlogger.info("raft topology: new keyspace RF change requested");
+                auto tmptr = get_token_metadata_ptr();
+                sstring ks_name = *_topo_sm._topology.new_keyspace_rf_change_ks_name;
+                std::map<sstring, sstring> new_rf_per_dc = *_topo_sm._topology.new_keyspace_rf_change_rf_per_dc;
+                std::vector<canonical_mutation> updates;
+                for (const auto& table : _db.find_keyspace(ks_name).metadata()->tables()) {
+                    auto new_tablet_map = co_await reallocate_tablets_for_new_rf(table, tmptr, new_rf_per_dc);
+                    rtlogger.debug("Updating tablet map for {}.{}", ks_name, table->cf_name());
+                    auto tablet_id = new_tablet_map.first_tablet();
+                    while (true) {
+                        auto& tablet_info = new_tablet_map.get_tablet_info(tablet_id);
+                        auto last_token = new_tablet_map.get_last_token(tablet_id);
 
+                        updates.emplace_back(replica::tablet_mutation_builder(guard.write_timestamp(), table->id())
+                                                                     .set_replicas(last_token, tablet_info.replicas)
+                                                                     .set_stage(last_token, locator::tablet_transition_stage::allow_write_both_read_old)
+                                                                     .set_transition(last_token, locator::tablet_transition_kind::rf_change)
+                                                                     .build());
+                        updates.push_back(canonical_mutation(topology_mutation_builder(guard.write_timestamp())
+                                                                     .set_transition_state(topology::transition_state::tablet_migration)
+                                                                     .set_version(_topo_sm._topology.version + 1)
+                                                                     .build()));
+
+                        if (auto next_tablet = new_tablet_map.next_tablet(tablet_id); next_tablet.has_value())
+                            tablet_id = *next_tablet;
+                        else
+                            break;
+                    }
                 }
-                topology_mutation_builder builder(guard.write_timestamp());
-                builder.set_transition_state(topology::transition_state::tablet_migration);
-                auto reason = ::format(
-                        "insert keyspace RF change data (ks name: {}, new RF per DC: {})", ks_name, rf_per_dc);
-                co_await update_topology_state(std::move(guard), {std::move(mutation), builder.build()}, reason);
-                break;
+                sstring reason = format("TODO Provide exhaustive reason");
+                rtlogger.info("{}", reason);
+                rtlogger.trace("do update {} reason {}", updates, reason);
+                topology_change change{std::move(updates)};
+                group0_command g0_cmd = _group0.client().prepare_command(std::move(change), guard, reason);
+                try {
+                    co_await _group0.client().add_entry(std::move(g0_cmd), std::move(guard), &_as);
+                    break;
+                } catch (group0_concurrent_modification&) {
+                    rtlogger.debug("move_tablet(): concurrent modification, retrying");
+                }
             }
+            break;
         }
-
         }
     }
 
