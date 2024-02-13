@@ -49,6 +49,8 @@ struct fmt::formatter<streaming::stream_reason> : fmt::formatter<std::string_vie
             return formatter<std::string_view>::format("repair", ctx);
         case replace:
             return formatter<std::string_view>::format("replace", ctx);
+        case rf_change:
+            return formatter<std::string_view>::format("rf_chang", ctx);
         case tablet_migration:
             return formatter<std::string_view>::format("tablet migration", ctx);
         case tablet_rebuild:
