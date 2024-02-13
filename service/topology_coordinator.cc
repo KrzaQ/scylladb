@@ -736,10 +736,6 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                                                                      .set_stage(last_token, locator::tablet_transition_stage::allow_write_both_read_old)
                                                                      .set_transition(last_token, locator::tablet_transition_kind::rf_change)
                                                                      .build());
-                        updates.push_back(canonical_mutation(topology_mutation_builder(guard.write_timestamp())
-                                                                     .set_transition_state(topology::transition_state::tablet_migration)
-                                                                     .set_version(_topo_sm._topology.version + 1)
-                                                                     .build()));
 
                         if (auto next_tablet = new_tablet_map.next_tablet(tablet_id); next_tablet.has_value())
                             tablet_id = *next_tablet;
@@ -747,6 +743,10 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                             break;
                     }
                 }
+                updates.push_back(canonical_mutation(topology_mutation_builder(guard.write_timestamp())
+                                                             .set_transition_state(topology::transition_state::tablet_migration)
+                                                             .set_version(_topo_sm._topology.version + 1)
+                                                             .build()));
                 sstring reason = format("TODO Provide exhaustive reason");
                 rtlogger.info("{}", reason);
                 rtlogger.trace("do update {} reason {}", updates, reason);
