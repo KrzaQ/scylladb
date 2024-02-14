@@ -5548,7 +5548,7 @@ namespace service {
         }
 
         while (true) {
-            if (!topology_global_queue_empty()) {
+            if (topology_global_queue_empty()) {
                 auto guard = co_await _group0->client().start_operation(&_group0_as);
                 request_id = guard.new_group0_state_id();
 
