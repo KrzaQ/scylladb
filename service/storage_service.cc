@@ -5541,35 +5541,51 @@ future<> storage_service::move_tablet(table_id table, dht::token token, locator:
 // TODO: remove this header. It's currently needed to throw cql3 exception if topology_global_queue_empty() == true
 #include "cql3/cql_statement.hh"
 namespace service {
-    future<> storage_service::alter_tablets_keyspace(sstring ks_name, std::map<sstring, sstring> replication_options) {
+    future<> storage_service::alter_tablets_keyspace(sstring ks_name, std::map<sstring, sstring> replication_options,
+                                                     std::optional<service::group0_guard>& guard) {
         utils::UUID request_id;
         if (this_shard_id() != 0) {
+            rtlogger.info("if (this_shard_id() != 0)");
             co_return;
         }
 
-        while (true) {
-            if (topology_global_queue_empty()) {
-                auto guard = co_await _group0->client().start_operation(&_group0_as);
-                request_id = guard.new_group0_state_id();
+        bool had_guard = guard.has_value();
 
-                topology_mutation_builder builder(guard.write_timestamp());
+        while (true) {
+            rtlogger.info("while (true)");
+            if (topology_global_queue_empty()) {
+                rtlogger.info("if (topology_global_queue_empty())");
+                if (not guard.has_value())
+                    guard = co_await _group0->client().start_operation(&_group0_as);
+                rtlogger.info("acquiring guard done");
+
+                topology_mutation_builder builder(guard->write_timestamp());
                 builder.set_global_topology_request(global_topology_request::keyspace_rf_change);
                 builder.set_new_keyspace_rf_change_data(ks_name, replication_options);
                 topology_change change{{builder.build()}};
+                rtlogger.info("building topology_change done");
 
-                group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard, "alter_tablets_keyspace");
+                group0_command g0_cmd = _group0->client().prepare_command(std::move(change), *guard, "alter_tablets_keyspace");
+                request_id = guard->new_group0_state_id();
+                rtlogger.info("prepare_command done");
                 try {
-                    co_await _group0->client().add_entry(std::move(g0_cmd), std::move(guard), &_abort_source);
+                    co_await _group0->client().add_entry(std::move(g0_cmd), std::move(*guard), &_abort_source);
+                    rtlogger.info("co_await _group0->client().add_entry done");
+                    if (had_guard)
+                        guard = co_await _group0->client().start_operation(&_group0_as);
                     break;
                 } catch (group0_concurrent_modification &) {
                     rtlogger.info("alter_tablets_keyspace: concurrent modification, retrying");
                 }
             } else {
+                rtlogger.info("else");
                 throw make_exception_future<std::tuple<::shared_ptr<::cql_transport::event::schema_change>, std::vector<mutation>, cql3::cql_warnings_vec>>(
                         exceptions::invalid_request_exception("alter_tablets_keyspace: topology mutation cannot be performed while other request is ongoing"));
             }
         }
+        rtlogger.info("before co_await wait_for_topology_request_completion");
         auto error = co_await wait_for_topology_request_completion(request_id);
+        rtlogger.info("co_await wait_for_topology_request_completion done");
 
         if (!error.empty()) {
             throw std::runtime_error(fmt::format("alter_tablets_keyspace failed with: {}", error));

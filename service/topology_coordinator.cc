@@ -684,7 +684,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
     }
 
     future<locator::tablet_map> reallocate_tablets_for_new_rf(schema_ptr s, locator::token_metadata_ptr tm,
-                                                              std::map<sstring, sstring> new_rf_per_dc) {
+                                                              std::unordered_map<sstring, sstring> new_rf_per_dc) {
         // TODO: include https://github.com/scylladb/scylladb/pull/17116
         co_return locator::tablet_map{8};
     }
@@ -721,11 +721,12 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                 rtlogger.info("raft topology: new keyspace RF change requested");
                 auto tmptr = get_token_metadata_ptr();
                 sstring ks_name = *_topo_sm._topology.new_keyspace_rf_change_ks_name;
-                std::map<sstring, sstring> new_rf_per_dc = *_topo_sm._topology.new_keyspace_rf_change_rf_per_dc;
+                std::unordered_map<sstring, sstring> new_rf_per_dc = *_topo_sm._topology.new_keyspace_rf_change_rf_per_dc;
+                rtlogger.info("global_topology_request::keyspace_rf_change {} {}", ks_name, new_rf_per_dc);
                 std::vector<canonical_mutation> updates;
                 for (const auto& table : _db.find_keyspace(ks_name).metadata()->tables()) {
                     auto new_tablet_map = co_await reallocate_tablets_for_new_rf(table, tmptr, new_rf_per_dc);
-                    rtlogger.debug("Updating tablet map for {}.{}", ks_name, table->cf_name());
+                    rtlogger.info("Updating tablet map for {}.{}", ks_name, table->cf_name());
                     auto tablet_id = new_tablet_map.first_tablet();
                     while (true) {
                         auto& tablet_info = new_tablet_map.get_tablet_info(tablet_id);
@@ -746,17 +747,18 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                 updates.push_back(canonical_mutation(topology_mutation_builder(guard.write_timestamp())
                                                              .set_transition_state(topology::transition_state::tablet_migration)
                                                              .set_version(_topo_sm._topology.version + 1)
+                                                             .del_global_topology_request()
                                                              .build()));
                 sstring reason = format("TODO Provide exhaustive reason");
                 rtlogger.info("{}", reason);
-                rtlogger.trace("do update {} reason {}", updates, reason);
+                rtlogger.info("do update {} reason {}", updates, reason);
                 topology_change change{std::move(updates)};
                 group0_command g0_cmd = _group0.client().prepare_command(std::move(change), guard, reason);
                 try {
                     co_await _group0.client().add_entry(std::move(g0_cmd), std::move(guard), &_as);
                     break;
                 } catch (group0_concurrent_modification&) {
-                    rtlogger.debug("move_tablet(): concurrent modification, retrying");
+                    rtlogger.info("move_tablet(): concurrent modification, retrying");
                 }
             }
             break;

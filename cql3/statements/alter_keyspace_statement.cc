@@ -120,12 +120,17 @@ future<::shared_ptr<cql_transport::messages::result_message>>
 cql3::statements::alter_keyspace_statement::execute(query_processor& qp, service::query_state& state, const query_options& options, std::optional<service::group0_guard> guard) const {
     std::vector<sstring> warnings = check_against_restricted_replication_strategies(qp, keyspace(), *_attrs, qp.get_cql_stats());
 
+    mylogger.warn("entering");
     auto&& replication_strategy = qp.db().find_keyspace(_name).get_replication_strategy();
     if (replication_strategy.uses_tablets()) {
         // TODO: check if new RF differs by at most 1 from the old RF. Fail the query otherwise
-        qp.alter_tablets_keyspace(_name, _attrs->get_replication_options()).get();
+        // always bounce to shard 0?
+        // w ctorze alter statement wziac needs_guard
+        mylogger.warn("if (replication_strategy.uses_tablets()): {}, {}", _name, _attrs->get_replication_options());
+        co_await qp.alter_tablets_keyspace(_name, _attrs->get_replication_options(), guard);
     }
-    return schema_altering_statement::execute(qp, state, options, std::move(guard)).then(
+    mylogger.warn("leaving");
+    co_return co_await schema_altering_statement::execute(qp, state, options, std::move(guard)).then(
             [warnings = std::move(warnings)](::shared_ptr<messages::result_message> msg) {
                 for (const auto &warning: warnings) {
                     msg->add_warning(warning);
