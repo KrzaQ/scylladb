@@ -5571,6 +5571,15 @@ namespace service {
                 try {
                     co_await _group0->client().add_entry(std::move(g0_cmd), std::move(*guard), &_abort_source);
                     rtlogger.info("co_await _group0->client().add_entry done");
+
+                    rtlogger.info("before co_await wait_for_topology_request_completion");
+                    auto error = co_await wait_for_topology_request_completion(request_id);
+                    rtlogger.info("co_await wait_for_topology_request_completion done");
+
+                    if (!error.empty()) {
+                        throw std::runtime_error(fmt::format("alter_tablets_keyspace failed with: {}", error));
+                    }
+
                     if (had_guard)
                         guard = co_await _group0->client().start_operation(&_group0_as);
                     break;
@@ -5582,13 +5591,6 @@ namespace service {
                 throw make_exception_future<std::tuple<::shared_ptr<::cql_transport::event::schema_change>, std::vector<mutation>, cql3::cql_warnings_vec>>(
                         exceptions::invalid_request_exception("alter_tablets_keyspace: topology mutation cannot be performed while other request is ongoing"));
             }
-        }
-        rtlogger.info("before co_await wait_for_topology_request_completion");
-        auto error = co_await wait_for_topology_request_completion(request_id);
-        rtlogger.info("co_await wait_for_topology_request_completion done");
-
-        if (!error.empty()) {
-            throw std::runtime_error(fmt::format("alter_tablets_keyspace failed with: {}", error));
         }
     }
 
