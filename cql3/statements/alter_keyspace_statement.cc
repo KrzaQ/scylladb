@@ -126,8 +126,8 @@ cql3::statements::alter_keyspace_statement::execute(query_processor& qp, service
         // TODO: check if new RF differs by at most 1 from the old RF. Fail the query otherwise
         // always bounce to shard 0?
         // w ctorze alter statement wziac needs_guard
-        mylogger.warn("if (replication_strategy.uses_tablets()): {}, {}", _name, _attrs->get_replication_options());
-        co_await qp.alter_tablets_keyspace(_name, _attrs->get_replication_options(), guard);
+        mylogger.warn("if (replication_strategy.uses_tablets()): {}, {}", _name, _attrs->get_replication_map());
+        co_await qp.alter_tablets_keyspace(_name, _attrs->get_replication_map(), guard);
     }
     mylogger.warn("leaving");
     co_return co_await schema_altering_statement::execute(qp, state, options, std::move(guard)).then(

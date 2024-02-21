@@ -1262,12 +1262,6 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
         }
     }
 
-    future<locator::tablet_map> reallocate_tablets_for_new_rf(schema_ptr s, locator::token_metadata_ptr tm,
-                                                              std::unordered_map<sstring, sstring> new_rf_per_dc) {
-        // TODO: include https://github.com/scylladb/scylladb/pull/17116
-        co_return locator::tablet_map{8};
-    }
-
     // Precondition: there is no node request and no ongoing topology transition
     // (checked under the guard we're holding).
     future<> handle_global_request(group0_guard guard) {
@@ -1304,7 +1298,17 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                 rtlogger.info("global_topology_request::keyspace_rf_change {} {}", ks_name, new_rf_per_dc);
                 std::vector<canonical_mutation> updates;
                 for (const auto& table : _db.find_keyspace(ks_name).metadata()->tables()) {
-                    auto new_tablet_map = co_await reallocate_tablets_for_new_rf(table, tmptr, new_rf_per_dc);
+                    //reallocate_tablets_for_new_rf(schema_ptr s, locator::token_metadata_ptr tm,
+                    //    std::unordered_map<sstring, size_t> new_rf_per_dc) {
+                    std::unordered_map<sstring, size_t> new_rf_per_int_dc;
+                    for (auto pair : new_rf_per_dc) {
+                        auto pp = std::pair{pair.first, std::stoi(pair.second)};
+                        new_rf_per_int_dc.insert(pp);
+                        rtlogger.info("pp: {} : {}", pp.first, pp.second);
+                    }
+
+                    rtlogger.info("przed co_await reallocate_tablets_for_new_rf");
+                    auto new_tablet_map = co_await reallocate_tablets_for_new_rf(table, tmptr, new_rf_per_int_dc);
                     rtlogger.info("Updating tablet map for {}.{}", ks_name, table->cf_name());
                     auto tablet_id = new_tablet_map.first_tablet();
                     while (true) {
