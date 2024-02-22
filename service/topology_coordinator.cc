@@ -153,7 +153,7 @@ static future<locator::tablet_replica_set> upsize_tablet_replicas_to_rf(const lo
 
         // Select subset of nodes to balance.
 
-    load_balancer_stats_manager stats;
+    load_balancer_stats_manager stats("upsize_tablet_replicas_to_rf");
 
     std::unordered_map<locator::host_id, node_load> nodes;
     std::unordered_set<locator::host_id> nodes_to_drain;

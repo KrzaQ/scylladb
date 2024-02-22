@@ -152,6 +152,7 @@ struct load_balancer_cluster_stats {
 using dc_name = sstring;
 
 class load_balancer_stats_manager {
+    sstring group_name;
     std::unordered_map<dc_name, std::unique_ptr<load_balancer_dc_stats>> _dc_stats;
     std::unordered_map<locator::host_id, std::unique_ptr<load_balancer_node_stats>> _node_stats;
     load_balancer_cluster_stats _cluster_stats;
@@ -162,7 +163,7 @@ class load_balancer_stats_manager {
     void setup_metrics(const dc_name& dc, load_balancer_dc_stats& stats) {
         namespace sm = seastar::metrics;
         auto dc_lb = dc_label(dc);
-        _metrics.add_group("load_balancer", {
+        _metrics.add_group(group_name, {
             sm::make_counter("calls", sm::description("number of calls to the load balancer"),
                              stats.calls)(dc_lb),
             sm::make_counter("migrations_produced", sm::description("number of migrations produced by the load balancer"),
@@ -176,7 +177,7 @@ class load_balancer_stats_manager {
         namespace sm = seastar::metrics;
         auto dc_lb = dc_label(dc);
         auto node_lb = node_label(node);
-        _metrics.add_group("load_balancer", {
+        _metrics.add_group(group_name, {
             sm::make_gauge("load", sm::description("node load during last load balancing"),
                            stats.load)(dc_lb)(node_lb)
         });
@@ -185,7 +186,7 @@ class load_balancer_stats_manager {
     void setup_metrics(load_balancer_cluster_stats& stats) {
         namespace sm = seastar::metrics;
         // FIXME: we can probably improve it by making it per resize type (split, merge or none).
-        _metrics.add_group("load_balancer", {
+        _metrics.add_group(group_name, {
             sm::make_counter("resizes_emitted", sm::description("number of resizes produced by the load balancer"),
                 stats.resizes_emitted),
             sm::make_counter("resizes_revoked", sm::description("number of resizes revoked by the load balancer"),
@@ -195,7 +196,9 @@ class load_balancer_stats_manager {
         });
     }
 public:
-    load_balancer_stats_manager() {
+    load_balancer_stats_manager(sstring group_name = "load_balancer"):
+        group_name(std::move(group_name))
+    {
         setup_metrics(_cluster_stats);
     }
 
