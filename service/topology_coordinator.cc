@@ -1310,6 +1310,13 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                     rtlogger.info("przed co_await reallocate_tablets_for_new_rf");
                     auto new_tablet_map = co_await reallocate_tablets_for_new_rf(table, tmptr, new_rf_per_int_dc);
                     rtlogger.info("Updating tablet map for {}.{}", ks_name, table->cf_name());
+
+                    for (auto tb : new_tablet_map.tablet_ids()) {
+                        const locator::tablet_info &ti = new_tablet_map.get_tablet_info(tb);
+                        locator::tablet_replica_set replicas = ti.replicas;
+                        rtlogger.info("smaron tablet {} map for {}", tb, replicas);
+                    }
+
                     auto tablet_id = new_tablet_map.first_tablet();
                     while (true) {
                         auto& tablet_info = new_tablet_map.get_tablet_info(tablet_id);
