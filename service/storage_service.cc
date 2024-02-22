@@ -5573,12 +5573,13 @@ namespace service {
                     rtlogger.info("co_await _group0->client().add_entry done");
 
                     rtlogger.info("before co_await wait_for_topology_request_completion");
-                    auto error = co_await wait_for_topology_request_completion(request_id);
-                    rtlogger.info("co_await wait_for_topology_request_completion done");
-
-                    if (!error.empty()) {
-                        throw std::runtime_error(fmt::format("alter_tablets_keyspace failed with: {}", error));
-                    }
+                    // TODO: fix waiting for global topology req
+//                    auto error = co_await wait_for_topology_request_completion(request_id);
+//                    rtlogger.info("co_await wait_for_topology_request_completion done");
+//
+//                    if (!error.empty()) {
+//                        throw std::runtime_error(fmt::format("alter_tablets_keyspace failed with: {}", error));
+//                    }
 
                     if (had_guard)
                         guard = co_await _group0->client().start_operation(&_group0_as);

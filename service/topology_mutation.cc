@@ -69,40 +69,6 @@ Builder& topology_mutation_builder_base<Builder>::apply_set(const char* cell, co
 }
 
 template<typename Builder>
-template<std::ranges::range C>
-//requires std::convertible_to<std::ranges::range_value_t<C>, data_value>
-Builder& topology_mutation_builder_base<Builder>::apply_map(const char* cell, collection_apply_mode apply_mode, const C& c) {
-    const column_definition* cdef = self().schema().get_column_definition(cell);
-//    assert(cdef);
-//    auto vtype = static_pointer_cast<const set_type_impl>(cdef->type)->get_elements_type();
-
-    auto column_type = static_pointer_cast<const map_type_impl>(cdef->type);
-    auto ktyp = column_type->get_keys_type();
-    auto vtyp = column_type->get_values_type();
-
-    std::map<bytes, bytes, serialized_compare> cmap(ktyp->as_less_comparator());
-    for (const auto& v : c) {
-        cmap.insert({ktyp->decompose(data_value(v.first)), vtyp->decompose(data_value(v.second))});
-    }
-
-    collection_mutation_description cm;
-    cm.cells.reserve(cmap.size());
-    for (const auto& [raw1, raw2] : cmap) {
-        cm.cells.emplace_back(ktyp->decompose(data_value(raw1)),
-                               atomic_cell::make_live(*vtyp, self().timestamp(), vtyp->decompose(data_value(raw2)),
-                                                      atomic_cell::collection_member::yes));
-//        cm.cells.emplace_back(raw1, raw2);
-    }
-
-    if (apply_mode == collection_apply_mode::overwrite) {
-        cm.tomb = tombstone(self().timestamp() - 1, gc_clock::now());
-    }
-
-    self().row().apply(*cdef, cm.serialize(*cdef->type));
-    return self();
-}
-
-template<typename Builder>
 Builder& topology_mutation_builder_base<Builder>::del(const char* cell) {
     auto cdef = self().schema().get_column_definition(cell);
     assert(cdef);
@@ -250,12 +216,15 @@ topology_mutation_builder& topology_mutation_builder::set_new_cdc_generation_dat
     return apply_atomic("new_cdc_generation_data_uuid", value);
 }
 
-topology_mutation_builder& topology_mutation_builder::set_new_keyspace_rf_change_data(
-        const sstring& ks_name, const std::map<sstring, sstring>& rf_per_dc) {
+topology_mutation_builder &topology_mutation_builder::set_new_keyspace_rf_change_data(
+        const sstring &ks_name, const std::map<sstring, sstring> &rf_per_dc) {
+    std::vector<std::pair<data_value, data_value>> values;
+    for (auto const &dc_rf: rf_per_dc)
+        values.push_back(std::make_pair(data_value(dc_rf.first), data_value(dc_rf.second)));
+
     apply_atomic("new_keyspace_rf_change_ks_name", ks_name);
-    apply_map("new_keyspace_rf_change_rf_per_dc", collection_apply_mode::overwrite, rf_per_dc);
-//    apply_set("new_keyspace_rf_change_rf_per_dc", collection_apply_mode::overwrite,
-//              rf_per_dc | boost::adaptors::transformed([] (const auto& f) { return f.first + ":" + f.second; }));
+    apply_atomic("new_keyspace_rf_change_rf_per_dc",
+                 make_map_value(schema().get_column_definition("new_keyspace_rf_change_rf_per_dc")->type, values));
     return *this;
 }
 
