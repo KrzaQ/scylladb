@@ -124,6 +124,26 @@ public:
     void on_leadership_lost();
 };
 
+// Represents metric for per-node load which we want to equalize between nodes.
+// It's an average per-shard load in terms of tablet count.
+using load_type = double;
+
+enum class tablet_reallocation_status {
+    success,
+    no_tablets_to_allocate,
+    not_enough_nodes,
+    more_than_one_error,
+};
+struct tablet_reallocation_result {
+    using status_map = std::map<sstring, std::set<tablet_reallocation_status>>;
+    locator::tablet_map new_tablet_map;
+    status_map status; // dc -> status
+};
+
+future<tablet_reallocation_result>
+reallocate_tablets_for_new_rf(schema_ptr s, locator::token_metadata_ptr tm,
+    std::unordered_map<sstring, sstring> const& ks_options);
+
 }
 
 template <>
