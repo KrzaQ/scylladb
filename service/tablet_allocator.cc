@@ -51,6 +51,7 @@ struct load_balancer_cluster_stats {
 using dc_name = sstring;
 
 class load_balancer_stats_manager {
+    sstring group_name;
     std::unordered_map<dc_name, std::unique_ptr<load_balancer_dc_stats>> _dc_stats;
     std::unordered_map<host_id, std::unique_ptr<load_balancer_node_stats>> _node_stats;
     load_balancer_cluster_stats _cluster_stats;
@@ -61,7 +62,7 @@ class load_balancer_stats_manager {
     void setup_metrics(const dc_name& dc, load_balancer_dc_stats& stats) {
         namespace sm = seastar::metrics;
         auto dc_lb = dc_label(dc);
-        _metrics.add_group("load_balancer", {
+        _metrics.add_group(group_name, {
             sm::make_counter("calls", sm::description("number of calls to the load balancer"),
                              stats.calls)(dc_lb),
             sm::make_counter("migrations_produced", sm::description("number of migrations produced by the load balancer"),
@@ -75,7 +76,7 @@ class load_balancer_stats_manager {
         namespace sm = seastar::metrics;
         auto dc_lb = dc_label(dc);
         auto node_lb = node_label(node);
-        _metrics.add_group("load_balancer", {
+        _metrics.add_group(group_name, {
             sm::make_gauge("load", sm::description("node load during last load balancing"),
                            stats.load)(dc_lb)(node_lb)
         });
@@ -84,7 +85,7 @@ class load_balancer_stats_manager {
     void setup_metrics(load_balancer_cluster_stats& stats) {
         namespace sm = seastar::metrics;
         // FIXME: we can probably improve it by making it per resize type (split, merge or none).
-        _metrics.add_group("load_balancer", {
+        _metrics.add_group(group_name, {
             sm::make_counter("resizes_emitted", sm::description("number of resizes produced by the load balancer"),
                 stats.resizes_emitted),
             sm::make_counter("resizes_revoked", sm::description("number of resizes revoked by the load balancer"),
@@ -94,7 +95,9 @@ class load_balancer_stats_manager {
         });
     }
 public:
-    load_balancer_stats_manager() {
+    load_balancer_stats_manager(sstring group_name = "load_balancer"):
+        group_name(std::move(group_name))
+    {
         setup_metrics(_cluster_stats);
     }
 
@@ -124,6 +127,78 @@ public:
 
     void unregister() {
         _metrics.clear();
+    }
+};
+
+tablet_replica_set get_replicas_for_tablet_load(const tablet_info& ti, const tablet_transition_info* trinfo) {
+    // We reflect migrations in the load as if they already happened,
+    // optimistically assuming that they will succeed.
+    return trinfo ? trinfo->next : ti.replicas;
+}
+
+using global_shard_id = tablet_replica;
+using shard_id = seastar::shard_id;
+
+// Represents metric for per-node load which we want to equalize between nodes.
+// It's an average per-shard load in terms of tablet count.
+using load_type = double;
+
+struct shard_load {
+    size_t tablet_count = 0;
+
+    // Number of tablets which are streamed from this shard.
+    size_t streaming_read_load = 0;
+
+    // Number of tablets which are streamed to this shard.
+    size_t streaming_write_load = 0;
+
+    // Tablets which still have a replica on this shard which are candidates for migrating away from this shard.
+    std::unordered_set<global_tablet_id> candidates;
+
+    future<> clear_gently() {
+        return utils::clear_gently(candidates);
+    }
+};
+
+struct node_load {
+
+    host_id id;
+    uint64_t shard_count = 0;
+    uint64_t tablet_count = 0;
+
+    // The average shard load on this node.
+    load_type avg_load = 0;
+
+    std::vector<shard_id> shards_by_load; // heap which tracks most-loaded shards using shards_by_load_cmp().
+    std::vector<shard_load> shards; // Indexed by shard_id to which a given shard_load corresponds.
+
+    std::optional<load_sketch> target_load_sketch;
+
+    future<load_sketch&> get_load_sketch(const locator::token_metadata_ptr& tm) {
+        if (!target_load_sketch) {
+            target_load_sketch.emplace(tm);
+            co_await target_load_sketch->populate(id);
+        }
+        co_return *target_load_sketch;
+    }
+
+    // Call when tablet_count changes.
+    void update() {
+        avg_load = get_avg_load(tablet_count);
+    }
+
+    load_type get_avg_load(uint64_t tablets) const {
+        return double(tablets) / shard_count;
+    }
+
+    auto shards_by_load_cmp() {
+        return [this] (const auto& a, const auto& b) {
+            return shards[a].tablet_count < shards[b].tablet_count;
+        };
+    }
+
+    future<> clear_gently() {
+        return utils::clear_gently(shards);
     }
 };
 
@@ -190,71 +265,6 @@ public:
 /// valid across calls and only recalculating them when starting a new round with a new token metadata version.
 ///
 class load_balancer {
-    using global_shard_id = tablet_replica;
-    using shard_id = seastar::shard_id;
-
-    // Represents metric for per-node load which we want to equalize between nodes.
-    // It's an average per-shard load in terms of tablet count.
-    using load_type = double;
-
-    struct shard_load {
-        size_t tablet_count = 0;
-
-        // Number of tablets which are streamed from this shard.
-        size_t streaming_read_load = 0;
-
-        // Number of tablets which are streamed to this shard.
-        size_t streaming_write_load = 0;
-
-        // Tablets which still have a replica on this shard which are candidates for migrating away from this shard.
-        std::unordered_set<global_tablet_id> candidates;
-
-        future<> clear_gently() {
-            return utils::clear_gently(candidates);
-        }
-    };
-
-    struct node_load {
-        host_id id;
-        uint64_t shard_count = 0;
-        uint64_t tablet_count = 0;
-
-        // The average shard load on this node.
-        load_type avg_load = 0;
-
-        std::vector<shard_id> shards_by_load; // heap which tracks most-loaded shards using shards_by_load_cmp().
-        std::vector<shard_load> shards; // Indexed by shard_id to which a given shard_load corresponds.
-
-        std::optional<locator::load_sketch> target_load_sketch;
-
-        future<load_sketch&> get_load_sketch(const token_metadata_ptr& tm) {
-            if (!target_load_sketch) {
-                target_load_sketch.emplace(tm);
-                co_await target_load_sketch->populate(id);
-            }
-            co_return *target_load_sketch;
-        }
-
-        // Call when tablet_count changes.
-        void update() {
-            avg_load = get_avg_load(tablet_count);
-        }
-
-        load_type get_avg_load(uint64_t tablets) const {
-            return double(tablets) / shard_count;
-        }
-
-        auto shards_by_load_cmp() {
-            return [this] (const auto& a, const auto& b) {
-                return shards[a].tablet_count < shards[b].tablet_count;
-            };
-        }
-
-        future<> clear_gently() {
-            return utils::clear_gently(shards);
-        }
-    };
-
     // We have split and merge thresholds, which work respectively as (target) upper and lower
     // bound for average size of tablets.
     //
@@ -401,12 +411,6 @@ class load_balancer {
     load_balancer_stats_manager& _stats;
     std::unordered_set<host_id> _skiplist;
 private:
-    tablet_replica_set get_replicas_for_tablet_load(const tablet_info& ti, const tablet_transition_info* trinfo) const {
-        // We reflect migrations in the load as if they already happened,
-        // optimistically assuming that they will succeed.
-        return trinfo ? trinfo->next : ti.replicas;
-    }
-
     // Whether to count the tablet as putting streaming load on the system.
     // Tablets which are streaming or are yet-to-stream are counted.
     bool is_streaming(const tablet_transition_info* trinfo) {
@@ -1108,6 +1112,11 @@ public:
         co_return std::move(plan);
     }
 };
+
+tablet_replica_set get_replicas_for_tablet_load(const tablet_info& ti, const tablet_transition_info* trinfo) {
+    // We reflect migrations in the load as if they already happened,
+    // optimistically assuming that they will succeed.
+    return trinfo ? trinfo->next : ti.replicas;
 
 class tablet_allocator_impl : public tablet_allocator::impl
                             , public service::migration_listener::empty_listener {
