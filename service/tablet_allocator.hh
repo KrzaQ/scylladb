@@ -12,6 +12,7 @@
 #include "locator/tablets.hh"
 #include "tablet_allocator_fwd.hh"
 #include "locator/token_metadata_fwd.hh"
+#include "locator/abstract_replication_strategy.hh"
 
 namespace service {
 
@@ -133,6 +134,7 @@ enum class tablet_reallocation_status {
     no_tablets_to_allocate,
     not_enough_nodes,
     more_than_one_error,
+    unknown_topology_strategy,
 };
 struct tablet_reallocation_result {
     using status_map = std::map<sstring, std::set<tablet_reallocation_status>>;
@@ -141,8 +143,8 @@ struct tablet_reallocation_result {
 };
 
 future<tablet_reallocation_result>
-reallocate_tablets_for_new_rf(schema_ptr s, locator::token_metadata_ptr tm,
-    std::unordered_map<sstring, sstring> const& ks_options);
+reallocate_tablets_for_new_rf(const locator::tablet_aware_replication_strategy*, schema_ptr s,
+    locator::token_metadata_ptr tm, std::unordered_map<sstring, sstring> const& ks_options);
 
 }
 
