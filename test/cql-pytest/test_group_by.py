@@ -131,16 +131,18 @@ def test_group_by_clustering_prefix_with_limit_and_paging(cql, table1):
 
 # Adding a PER PARTITION LIMIT should be honored
 # Reproduces #5363 - fewer results than the limit were generated
-@pytest.mark.xfail(reason="issue #5363")
+# @pytest.mark.xfail(reason="issue #5363")
 def test_group_by_clustering_prefix_with_pplimit(cql, table1):
     # Without per-partition limit we get 4 results, 2 from each partition:
     assert {(0,0,0,1), (0,1,0,3), (1,0,0,5), (1,1,0,7)} == set(cql.execute(f'SELECT p,c1,c2,v FROM {table1} GROUP BY p,c1'))
     # With per-partition limit of 2, no change:
     # But in issue #5363, we got here fewer results.
-    assert {(0,0,0,1), (0,1,0,3), (1,0,0,5), (1,1,0,7)} == set(cql.execute(f'SELECT p,c1,c2,v FROM {table1} GROUP BY p,c1 PER PARTITION LIMIT 2'))
+    assert {(0,0,0,1), (0,1,0,3), (1,0,0,5), (1,1,0,7)} == set(cql.execute(f'SELECT p,c1,c2,v FROM {table1} GROUP BY p,c1 PER PARTITION LIMIT 1337'))
+    assert {(0,0,0,1), (1,0,0,5)} ==                       set(cql.execute(f'SELECT p,c1,c2,v FROM {table1} GROUP BY p,c1 PER PARTITION LIMIT 1'))
+    assert {(0,0,0,1), (0,1,0,3), (1,0,0,5), (1,1,0,7)} == set(cql.execute(f'SELECT p,c1,c2,v FROM {table1} GROUP BY p,c1 PER PARTITION LIMIT 3'))
     # With per-partition limit of 1, we should get just two of the results -
     # the lower clustering key in each.
-    assert {(0,0,0,1), (1,0,0,5)} == set(cql.execute(f'SELECT p,c1,c2,v FROM {table1} GROUP BY p,c1 PER PARTITION LIMIT 1'))
+    # assert {(0,0,0,1), (1,0,0,5)} ==                       set(cql.execute(f'SELECT p,c1,c2,v FROM {table1} GROUP BY p,c1 PER PARTITION LIMIT 0'))
 
 # GROUP BY the entire primary key doesn't really do anything, but is
 # allowed

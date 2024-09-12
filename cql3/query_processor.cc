@@ -700,6 +700,7 @@ query_processor::get_statement(const sstring_view& query, const service::client_
 
 std::unique_ptr<raw::parsed_statement>
 query_processor::parse_statement(const sstring_view& query, dialect d) {
+    log.warn("KQ - Parsing statement: {}", query);
     try {
         {
             const char* error_injection_key = "query_processor-parse_statement-test_failure";

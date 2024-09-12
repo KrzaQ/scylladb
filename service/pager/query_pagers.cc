@@ -59,6 +59,7 @@ query_pager::query_pager(service::storage_proxy& p, schema_ptr query_schema,
                 , _cmd(std::move(cmd))
                 , _ranges(std::move(ranges))
 {
+    qlogger.warn("KQ - {} query_function_override: {}", __LINE__, !!query_function_override);
     if (query_function_override) {
         _query_function = std::move(query_function_override);
     } else {
@@ -69,6 +70,7 @@ query_pager::query_pager(service::storage_proxy& p, schema_ptr query_schema,
                 dht::partition_range_vector&& partition_ranges,
                 db::consistency_level cl,
                 service::storage_proxy_coordinator_query_options optional_params) {
+            qlogger.warn("KQ - {} query_function", __LINE__);
             return sp.query_result(std::move(query_schema), std::move(cmd), std::move(partition_ranges), cl, std::move(optional_params));
         };
     }
@@ -76,6 +78,9 @@ query_pager::query_pager(service::storage_proxy& p, schema_ptr query_schema,
 
 future<result<service::storage_proxy::coordinator_query_result>> query_pager::do_fetch_page(uint32_t page_size, gc_clock::time_point now, db::timeout_clock::time_point timeout) {
     auto state = _options.get_paging_state();
+
+    qlogger.warn("KQ - {} do_fetch_page - page_size: {}, partition_row_limit: {}, partition_limit: {}",
+        __LINE__, page_size, _cmd->slice.partition_row_limit(), _cmd->partition_limit);
 
     // Most callers should set this but we want to make sure, as results
     // won't be paged without it.
@@ -102,6 +107,8 @@ future<result<service::storage_proxy::coordinator_query_result>> query_pager::do
 
     qlogger.trace("fetch_page query id {}", _cmd->query_uuid);
 
+    qlogger.warn("KQ - {} do_fetch_page - page_size: {}, partition_row_limit: {}, partition_limit: {}",
+        __LINE__, page_size, _cmd->slice.partition_row_limit(), _cmd->partition_limit);
     if (_last_pkey) {
         auto dpk = dht::decorate_key(*_query_schema, *_last_pkey);
         dht::ring_position lo(dpk);
@@ -169,7 +176,9 @@ future<result<service::storage_proxy::coordinator_query_result>> query_pager::do
         }
     }
 
+    qlogger.warn("KQ - {} _cmd->slice.partition_row_limit(): {}", __LINE__, _cmd->slice.partition_row_limit());
     auto max_rows = max_rows_to_fetch(page_size);
+    qlogger.warn("KQ - {} _cmd->slice.partition_row_limit(): {}", __LINE__, _cmd->slice.partition_row_limit());
 
     // We always need PK so we can determine where to start next.
     _cmd->slice.options.set<query::partition_slice::option::send_partition_key>();
@@ -178,8 +187,15 @@ future<result<service::storage_proxy::coordinator_query_result>> query_pager::do
         _cmd->slice.options.set<
                 query::partition_slice::option::send_clustering_key>();
     }
+    qlogger.warn("KQ - {} _cmd->slice.partition_row_limit(): {}", __LINE__, _cmd->slice.partition_row_limit());
     _cmd->set_row_limit(max_rows);
+    qlogger.warn("KQ - {} _cmd->slice.partition_row_limit(): {}", __LINE__, _cmd->slice.partition_row_limit());
+    qlogger.warn("KQ - {} _cmd->get_row_limit(): {}", __LINE__, _cmd->get_row_limit());
+    qlogger.warn("KQ - {} _cmd->partition_limit: {}", __LINE__, _cmd->partition_limit);
     maybe_adjust_per_partition_limit(page_size);
+    qlogger.warn("KQ - {} max_rows: {}, page_size: {}, _cmd->slice.partition_row_limit: {}",
+        __LINE__, max_rows, page_size, _cmd->slice.partition_row_limit());
+    qlogger.warn("KQ - {} _cmd->slice.partition_row_limit(): {}", __LINE__, _cmd->slice.partition_row_limit());
 
     qlogger.debug("Fetching {}, page size={}, max_rows={}",
             _cmd->cf_id, page_size, max_rows
@@ -193,7 +209,13 @@ future<result<service::storage_proxy::coordinator_query_result>> query_pager::do
             std::move(command),
             std::move(ranges),
             _options.get_consistency(),
-            {timeout, _state.get_permit(), _state.get_client_state(), _state.get_trace_state(), std::move(_last_replicas), _query_read_repair_decision});
+            {timeout, _state.get_permit(), _state.get_client_state(), _state.get_trace_state(), std::move(_last_replicas), _query_read_repair_decision})
+            .then([] (auto ret) {
+
+                qlogger.warn("KQ - {} row count: {}", __LINE__,
+                    ret.value().query_result->row_count().value_or(1337));
+                return std::move(ret);
+            });
 }
 
 future<> query_pager::fetch_page(cql3::selection::result_set_builder& builder, uint32_t page_size, gc_clock::time_point now, db::timeout_clock::time_point timeout) {
@@ -202,9 +224,12 @@ future<> query_pager::fetch_page(cql3::selection::result_set_builder& builder, u
 }
 
 future<result<>> query_pager::fetch_page_result(cql3::selection::result_set_builder& builder, uint32_t page_size, gc_clock::time_point now, db::timeout_clock::time_point timeout) {
+    qlogger.warn("KQ - {} fetch_page_result - page_size: {}", __LINE__, page_size);
     return do_fetch_page(page_size, now, timeout).then(utils::result_wrap([this, &builder, page_size, now] (service::storage_proxy::coordinator_query_result qr) {
         _last_replicas = std::move(qr.last_replicas);
         _query_read_repair_decision = qr.read_repair_decision;
+        qlogger.warn("KQ - {} row count: {}", __LINE__,
+            qr.query_result->row_count().value_or(1337));
         return builder.with_thread_if_needed([this, &builder, page_size, now, qr = std::move(qr)] () mutable -> result<> {
             handle_result(cql3::selection::result_set_builder::visitor(builder, *_query_schema, *_selection),
                           std::move(qr.query_result), page_size, now);
@@ -262,14 +287,17 @@ public:
     virtual ~filtering_query_pager() {}
 
     virtual future<result<>> fetch_page_result(cql3::selection::result_set_builder& builder, uint32_t page_size, gc_clock::time_point now, db::timeout_clock::time_point timeout) override {
+        qlogger.warn("KQ - {} fetch_page_result - page_size: {}", __LINE__, page_size);
         return do_fetch_page(page_size, now, timeout).then(utils::result_wrap([this, &builder, page_size, now] (service::storage_proxy::coordinator_query_result qr) {
             _last_replicas = std::move(qr.last_replicas);
             _query_read_repair_decision = qr.read_repair_decision;
             qr.query_result->ensure_counts();
             _stats.rows_read_total += *qr.query_result->row_count();
             return builder.with_thread_if_needed([&builder, this, query_result = std::move(qr.query_result), page_size, now] () mutable -> result<> {
+                qlogger.warn("KQ - {} _cmd->slice.partition_row_limit(): {}, _per_partition_limit: {}, results->row_count(): {}",
+                    __LINE__, _cmd->slice.partition_row_limit(), _per_partition_limit, query_result->row_count().value_or(1337));
                 handle_result(cql3::selection::result_set_builder::visitor(builder, *_query_schema, *_selection,
-                            cql3::selection::result_set_builder::restrictions_filter(_filtering_restrictions, _options, _max, _query_schema, _per_partition_limit, _last_pkey, _rows_fetched_for_last_partition)),
+                            cql3::selection::result_set_builder::restrictions_filter(_filtering_restrictions, _options, _max, _query_schema, _per_partition_limit, _last_pkey, _rows_fetched_for_last_partition, _selection->is_aggregate())),
                             std::move(query_result), page_size, now);
                 return bo::success();
             });
@@ -279,10 +307,15 @@ public:
 protected:
     virtual uint64_t max_rows_to_fetch(uint32_t page_size) override {
         return static_cast<uint64_t>(page_size);
+        // return std::min(static_cast<uint64_t>(page_size),
+            // _cmd->slice.partition_row_limit());
     }
 
     virtual void maybe_adjust_per_partition_limit(uint32_t page_size) const override {
+        // auto current = _cmd->slice.partition_row_limit();
         _cmd->slice.set_partition_row_limit(page_size);
+        // qlogger.warn("KQ - {} _cmd->slice.partition_row_limit(): {}", __LINE__, _cmd->slice.partition_row_limit());
+        // _cmd->slice.set_partition_row_limit(std::min(uint64_t{page_size}, current));
     }
 };
 
@@ -311,6 +344,7 @@ public:
     virtual ~ghost_row_deleting_query_pager() {}
 
     virtual future<result<>> fetch_page_result(cql3::selection::result_set_builder& builder, uint32_t page_size, gc_clock::time_point now, db::timeout_clock::time_point timeout) override {
+        qlogger.warn("KQ - {} fetch_page_result - page_size: {}", __LINE__, page_size);
         return do_fetch_page(page_size, now, timeout).then(utils::result_wrap([this, page_size, now] (service::storage_proxy::coordinator_query_result qr) {
             _last_replicas = std::move(qr.last_replicas);
             _query_read_repair_decision = qr.read_repair_decision;
@@ -341,6 +375,7 @@ public:
     }
     void accept_new_partition(const partition_key& key, uint64_t row_count) {
         qlogger.trace("Accepting partition: {} ({})", key, row_count);
+        qlogger.warn("KQ - {} accept_new_partition partition key: {}, row_count: {}", __LINE__, key, row_count);
         total_rows += std::max(row_count, uint64_t(1));
         last_pkey = key;
         last_ckey = { };
@@ -351,14 +386,17 @@ public:
             const query::result_row_view& static_row,
             const query::result_row_view& row) {
         last_ckey = key;
+        qlogger.warn("KQ - {} accept_new_row clustering key: {}", __LINE__, key);
         visitor::accept_new_row(key, static_row, row);
     }
     void accept_new_row(const query::result_row_view& static_row,
             const query::result_row_view& row) {
+        qlogger.warn("KQ - {} accept_new_row clustering key: {}", __LINE__, "none");
         visitor::accept_new_row(static_row, row);
     }
     void accept_partition_end(const query::result_row_view& static_row) {
         const uint64_t dropped = visitor::accept_partition_end(static_row);
+        qlogger.trace("KQ - {} accept_partition_end Partition end, dropped: {}", __LINE__, dropped);
         dropped_rows += dropped;
         last_partition_row_count -= dropped;
     }
@@ -372,6 +410,7 @@ void query_pager::handle_result(
         uint32_t page_size, gc_clock::time_point now) {
 
     auto update_slice = [&] (const partition_key& last_pkey) {
+        qlogger.warn("KQ - {} update_slice last_pkey: {}", __LINE__, last_pkey);
         // refs #752, when doing aggregate queries we will reuse same
         // slice repeatedly. Since "specific ck ranges" only deal with
         // a single extra range, we must clear out the old one
@@ -385,6 +424,7 @@ void query_pager::handle_result(
     _last_pos = position_in_partition::for_partition_start();
     uint64_t row_count;
     if constexpr(!std::is_same_v<std::decay_t<Visitor>, noop_visitor>) {
+        qlogger.warn("KQ - {} handle_result", __LINE__);
         query_result_visitor<Visitor> v(std::forward<Visitor>(visitor));
         view.consume(_cmd->slice, v);
 
@@ -395,7 +435,30 @@ void query_pager::handle_result(
         row_count = v.total_rows - v.dropped_rows;
         _max = _max - row_count;
         _exhausted = (v.total_rows < page_size && !results->is_short_read() && v.dropped_rows == 0) || _max == 0;
+        const bool aggregate = _selection->is_aggregate();
+        if (aggregate) {
+            // _exhausted = false;
+        }
+        qlogger.warn("KQ - {} _cmd->slice.partition_row_limit(): {}, exhausted: {}, row_count: {}, v.total_rows: {}, v.dropped_rows: {}",
+            __LINE__, _cmd->slice.partition_row_limit(), _exhausted, row_count, v.total_rows, v.dropped_rows);
+        if (_exhausted) {
+            if (v.total_rows == _cmd->slice.partition_row_limit()) {
+                // _exhausted = false;
+            }
+        }
         // If per partition limit is defined, we need to accumulate rows fetched for last partition key if the key matches
+        qlogger.warn("KQ - {} _cmd->slice.partition_row_limit(): {}, exhausted: {}, row_count: {}, v.total_rows: {}, v.dropped_rows: {}",
+            __LINE__, _cmd->slice.partition_row_limit(), _exhausted, row_count, v.total_rows, v.dropped_rows);
+        if (_last_pkey) {
+            qlogger.warn("KQ - {} _last_pkey: {}", __LINE__, *_last_pkey);
+        }
+        if (v.last_pkey) {
+            qlogger.warn("KQ - {} last_pkey: {}", __LINE__, *v.last_pkey);
+        }
+        if (_last_pkey && v.last_pkey) {
+            const bool same_pkey = _last_pkey->equal(*_query_schema, *v.last_pkey);
+            qlogger.warn("KQ - {} same_pkey: {}", __LINE__, same_pkey);
+        }
         if (_cmd->slice.partition_row_limit() < query::max_rows_if_set) {
             if (_last_pkey && v.last_pkey && _last_pkey->equal(*_query_schema, *v.last_pkey)) {
                 _rows_fetched_for_last_partition += v.last_partition_row_count;
@@ -429,12 +492,15 @@ void query_pager::handle_result(
     }
 
     qlogger.debug("Fetched {} rows, max_remain={} {}", row_count, _max, _exhausted ? "(exh)" : "");
+    qlogger.warn("KQ - {} Fetch {} rows, max_remain={} {}", __LINE__, row_count, _max, _exhausted ? "(exh)" : "");
 
     if (_last_pkey) {
         qlogger.debug("Last partition key: {}", *_last_pkey);
+        qlogger.warn("KQ - {} Last partition key: {}", __LINE__, *_last_pkey);
     }
     if (_has_clustering_keys && _last_pos.region() == partition_region::clustered) {
         qlogger.debug("Last clustering pos: {}", _last_pos);
+        qlogger.warn("KQ - {} Last clustering pos: {}", __LINE__, _last_pos);
     }
 }
 
@@ -470,7 +536,7 @@ bool service::pager::query_pagers::may_need_paging(const schema& s, uint32_t pag
     qlogger.debug("Query of {}, page_size={}, limit={} {}", cmd.cf_id, page_size,
                     cmd.get_row_limit(),
                     need_paging ? "requires paging" : "does not require paging");
-
+    qlogger.warn("KQ - {} cmd.get_row_limit(): {}, page_size: {}", __LINE__, cmd.get_row_limit(), page_size);
     return need_paging;
 }
 
@@ -484,10 +550,15 @@ std::unique_ptr<service::pager::query_pager> service::pager::query_pagers::pager
         query_function query_function_override) {
     // If partition row limit is applied to paging, we still need to fall back
     // to filtering the results to avoid extraneous rows on page breaks.
+    qlogger.warn("KQ - {} cmd->slice.partition_row_limit(): {}", __LINE__, cmd->slice.partition_row_limit());
     if (!filtering_restrictions && cmd->slice.partition_row_limit() < query::max_rows_if_set) {
+        qlogger.warn("KQ - {} cmd->slice.partition_row_limit(): {} add filtering_restrictions",
+            __LINE__, cmd->slice.partition_row_limit());
         filtering_restrictions = ::make_shared<cql3::restrictions::statement_restrictions>(s, true);
     }
     if (filtering_restrictions) {
+        qlogger.warn("KQ - {} cmd->slice.partition_row_limit(): {} filtering_restrictions",
+            __LINE__, cmd->slice.partition_row_limit());
         return std::make_unique<filtering_query_pager>(proxy, std::move(s), std::move(selection), state,
                     options, std::move(cmd), std::move(ranges), std::move(filtering_restrictions), std::move(query_function_override));
     }

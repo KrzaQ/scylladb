@@ -27,6 +27,8 @@ class result_set;
 class metadata;
 class query_options;
 
+extern logger visitor_logger;
+
 namespace restrictions {
 class statement_restrictions;
 }
@@ -43,6 +45,8 @@ public:
     virtual bool requires_thread() const = 0;
 
     virtual bool is_aggregate() const = 0;
+
+    virtual uint64_t get_input_row_count() const = 0;
 
     /**
     * Adds the current row of the specified <code>ResultSetBuilder</code>.
@@ -174,9 +178,13 @@ private:
     std::unique_ptr<selectors> _selectors;
     const std::vector<size_t> _group_by_cell_indices; ///< Indices in \c current of cells holding GROUP BY values.
     const uint64_t _limit; ///< Maximum number of rows to return.
+    const uint64_t _per_partition_limit; ///< Maximum number of rows to return per partition.
+    mutable uint64_t _per_partition_remaining; ///< Remaining rows to return for the current partition.
+    bool _new_partition = true;
     std::vector<managed_bytes_opt> _last_group; ///< Previous row's group: all of GROUP BY column values.
     bool _group_began; ///< Whether a group began being formed.
 public:
+    bool _special_flag_for_last_group = false; ///< True iff the last group was ended by the current row.
     std::vector<managed_bytes_opt> current;
     std::vector<bytes> current_partition_key;
     std::vector<bytes> current_clustering_key;
@@ -204,6 +212,9 @@ public:
         uint64_t get_rows_dropped() const {
             return 0;
         }
+        uint64_t decrement_per_partition_remaining() const {
+            return std::numeric_limits<uint64_t>::max();
+        }
     };
     class restrictions_filter {
         const ::shared_ptr<const restrictions::statement_restrictions> _restrictions;
@@ -219,6 +230,7 @@ public:
         mutable uint64_t _rows_fetched_for_last_partition;
         mutable std::optional<partition_key> _last_pkey;
         mutable bool _is_first_partition_on_page = true;
+        bool _is_aggregate;
     public:
         explicit restrictions_filter(::shared_ptr<const restrictions::statement_restrictions> restrictions,
                 const query_options& options,
@@ -226,11 +238,18 @@ public:
                 schema_ptr schema,
                 uint64_t per_partition_limit,
                 std::optional<partition_key> last_pkey = {},
-                uint64_t rows_fetched_for_last_partition = 0);
+                uint64_t rows_fetched_for_last_partition = 0,
+                bool is_aggregate = false);
         bool operator()(const selection& selection, const std::vector<bytes>& pk, const std::vector<bytes>& ck, const query::result_row_view& static_row, const query::result_row_view* row) const;
         void reset(const partition_key* key = nullptr);
         uint64_t get_rows_dropped() const {
             return _rows_dropped;
+        }
+        uint64_t decrement_per_partition_remaining() const {
+            if (_per_partition_remaining > 0) {
+                _per_partition_remaining--;
+            }
+            return _per_partition_remaining;
         }
     private:
         bool do_filter(const selection& selection, const std::vector<bytes>& pk, const std::vector<bytes>& ck, const query::result_row_view& static_row, const query::result_row_view* row) const;
@@ -238,7 +257,8 @@ public:
 
     result_set_builder(const selection& s, gc_clock::time_point now,
                        std::vector<size_t> group_by_cell_indices = {},
-                       uint64_t limit = std::numeric_limits<uint64_t>::max());
+                       uint64_t limit = std::numeric_limits<uint64_t>::max(),
+                       uint64_t per_partition_limit = std::numeric_limits<uint64_t>::max());
     void add_empty();
     void add(bytes_opt value);
     void add(const column_definition& def, const query::result_atomic_cell_view& c);
@@ -249,6 +269,7 @@ public:
     api::timestamp_type timestamp_of(size_t idx);
     int32_t ttl_of(size_t idx);
     size_t result_set_size() const;
+    void accept_new_partition();
 
     // Implements ResultVisitor concept from query.hh
     template<typename Filter = nop_filter>
@@ -258,9 +279,12 @@ public:
         const schema& _schema;
         const selection& _selection;
         uint64_t _row_count;
+        uint64_t _partition_rows_processed = 0;
+        uint64_t _total_rows_before_partition = 0;
         std::vector<bytes>& _partition_key;
         std::vector<bytes>& _clustering_key;
         Filter _filter;
+        bool _first_row_in_partition = true;
     public:
         visitor(cql3::selection::result_set_builder& builder, const schema& s,
                 const selection& selection, Filter filter = Filter())
@@ -293,14 +317,24 @@ public:
         }
 
         void accept_new_partition(const partition_key& key, uint64_t row_count) {
+            visitor_logger.warn("KQ - {} - accept_new_partition, _row_count: {}", __LINE__, row_count);
             _partition_key = key.explode(_schema);
             _row_count = row_count;
             _filter.reset(&key);
+            _first_row_in_partition = true;
+            _builder.accept_new_partition();
+            _partition_rows_processed = 0;
+            _total_rows_before_partition = _builder.result_set_size();
         }
 
         void accept_new_partition(uint64_t row_count) {
+            visitor_logger.warn("KQ - {} - accept_new_partition, _row_count: {}", __LINE__, row_count);
             _row_count = row_count;
             _filter.reset();
+            _first_row_in_partition = true;
+            _builder.accept_new_partition();
+            _partition_rows_processed = 0;
+            _total_rows_before_partition = _builder.result_set_size();
         }
 
         void accept_new_row(const clustering_key& key, const query::result_row_view& static_row, const query::result_row_view& row) {
@@ -309,11 +343,15 @@ public:
         }
 
         void accept_new_row(const query::result_row_view& static_row, const query::result_row_view& row) {
+            visitor_logger.warn("KQ - {} - accept_new_row, _row_count: {}", __LINE__, _row_count);
             auto static_row_iterator = static_row.iterator();
             auto row_iterator = row.iterator();
+            const bool is_aggregate = _selection.is_aggregate();
             if (!_filter(_selection, _partition_key, _clustering_key, static_row, &row)) {
+                visitor_logger.warn("KQ - {} - _filter returned false", __LINE__);
                 return;
             }
+            // const size_t size_before = _builder.result_set_size();
             _builder.start_new_row();
             for (auto&& def : _selection.get_columns()) {
                 switch (def->kind) {
@@ -337,10 +375,30 @@ public:
                     SCYLLA_ASSERT(0);
                 }
             }
+            bool last_group_ended = _builder.last_group_ended();
+            visitor_logger.warn("KQ - {} - last_group_ended: {}, is_aggregate: {}, _first_row_in_partition: {}",
+                __LINE__, last_group_ended, is_aggregate, _first_row_in_partition);
+            if (is_aggregate) {
+                // if (size_after > size_before) {
+                if (last_group_ended) {
+                    uint64_t remaining = _filter.decrement_per_partition_remaining();
+                    if (!_first_row_in_partition && remaining == 0) {
+                        // _builder._special_flag_for_last_group = true;
+                    } else {
+                        _builder._special_flag_for_last_group = false;
+                    }
+                } else {
+                    _builder._special_flag_for_last_group = false;
+                }
+            }
             _builder.complete_row();
+            _first_row_in_partition = false;
+            // const size_t size_after = _builder.result_set_size();
         }
 
         uint64_t accept_partition_end(const query::result_row_view& static_row) {
+            visitor_logger.warn("KQ - {} - accept_partition_end, _row_count: {}", __LINE__, _row_count);
+            // _builder._special_flag_for_last_group = false;
             if (_row_count == 0) {
                 if (!_filter(_selection, _partition_key, _clustering_key, static_row, nullptr)) {
                     return _filter.get_rows_dropped();
@@ -357,6 +415,12 @@ public:
                     }
                 }
                 _builder.complete_row();
+            }
+            if (_selection.is_aggregate()) {
+                const auto size = _builder.result_set_size();
+                const auto added = size - _total_rows_before_partition;
+                const auto dropped = _partition_rows_processed - added;
+                return dropped;
             }
             return _filter.get_rows_dropped();
         }

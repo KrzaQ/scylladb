@@ -27,6 +27,7 @@
 namespace cql3 {
 
 logger cql_logger("cql_logger");
+logger visitor_logger("visitor_logger");
 
 namespace selection {
 
@@ -149,6 +150,10 @@ protected:
 
         virtual bool is_aggregate() const override {
             return false;
+        }
+
+        virtual uint64_t get_input_row_count() const override {
+            return 0;
         }
     };
 
@@ -344,6 +349,7 @@ protected:
         const selection_with_processing& _sel;
         std::vector<raw_value> _temporaries;
         bool _requires_thread;
+        uint64_t _input_row_count = 0;
     public:
         explicit selectors_with_processing(const selection_with_processing& sel)
             : _sel(sel)
@@ -361,10 +367,15 @@ protected:
 
         virtual void reset() override {
             _temporaries = _sel._initial_values_for_temporaries;
+            _input_row_count = 0;
         }
 
         virtual bool is_aggregate() const override {
             return !_sel._inner_loop.empty();
+        }
+
+        virtual uint64_t get_input_row_count() const override {
+            return _input_row_count;
         }
 
         virtual std::vector<managed_bytes_opt> transform_input_row(result_set_builder& rs) override {
@@ -408,6 +419,8 @@ protected:
         }
 
         virtual void add_input_row(result_set_builder& rs) override {
+            cql_logger.warn("KQ - {} add input row to selectors with processing", __LINE__);
+            _input_row_count++;
             auto inputs = expr::evaluation_inputs{
                     .partition_key = rs.current_partition_key,
                     .clustering_key = rs.current_clustering_key,
@@ -504,11 +517,13 @@ selection::collect_metadata(const schema& schema, const std::vector<prepared_sel
 
 result_set_builder::result_set_builder(const selection& s, gc_clock::time_point now,
                                        std::vector<size_t> group_by_cell_indices,
-                                       uint64_t limit)
+                                       uint64_t limit, uint64_t per_partition_limit)
     : _result_set(std::make_unique<result_set>(::make_shared<metadata>(*(s.get_result_metadata()))))
     , _selectors(s.new_selectors())
     , _group_by_cell_indices(std::move(group_by_cell_indices))
     , _limit(limit)
+    , _per_partition_limit(per_partition_limit)
+    , _per_partition_remaining(per_partition_limit)
     , _last_group(_group_by_cell_indices.size())
     , _group_began(false)
     , _now(now)
@@ -536,6 +551,7 @@ void result_set_builder::add(bytes_opt value) {
 }
 
 void result_set_builder::add(const column_definition& def, const query::result_atomic_cell_view& c) {
+    cql_logger.warn("KQ - {} add column {}: {}", __LINE__, def.name_as_text(), c.value());
     current.emplace_back(get_value(def.type, c));
     if (!_timestamps.empty()) {
         _timestamps[current.size() - 1] = c.timestamp();
@@ -551,27 +567,35 @@ void result_set_builder::add(const column_definition& def, const query::result_a
 }
 
 void result_set_builder::add_collection(const column_definition& def, bytes_view c) {
+    cql_logger.warn("KQ - {} add collection", __LINE__);
     current.emplace_back(to_bytes(c));
     // timestamps, ttls meaningless for collections
 }
 
 void result_set_builder::update_last_group() {
+    cql_logger.warn("KQ - {} update last group: last group empty: {}, group by cell indices empty: {}",
+        __LINE__, _last_group.empty(), _group_by_cell_indices.empty());
     _group_began = true;
     boost::transform(_group_by_cell_indices, _last_group.begin(), [this](size_t i) { return current[i]; });
 }
 
 bool result_set_builder::last_group_ended() const {
+    cql_logger.warn("KQ - {} last group ended: last group empty: {}, group by cell indices empty: {}, selectors aggregate: {}",
+        __LINE__, _last_group.empty(), _group_by_cell_indices.empty(), _selectors->is_aggregate());
     if (!_group_began) {
         return false;
     }
     if (_last_group.empty()) {
         return !_selectors->is_aggregate();
     }
+    // _per_partition_remaining = _per_partition_limit;
     using boost::adaptors::reversed;
     using boost::adaptors::transformed;
-    return !boost::equal(
+    bool result = !boost::equal(
             _last_group | reversed,
             _group_by_cell_indices | reversed | transformed([this](size_t i) { return current[i]; }));
+    cql_logger.warn("KQ - {} last group ended: {}", __LINE__, result);
+    return result;
 }
 
 void result_set_builder::flush_selectors() {
@@ -579,34 +603,88 @@ void result_set_builder::flush_selectors() {
         // handled by process_current_row
         return;
     }
-    if (_result_set->size() < _limit) {
+    // if (_selectors->size() == 0) {
+    //     return;
+    // }
+    cql_logger.warn("KQ - {} flush selectors() _selectors->get_input_row_count(): {}",
+        __LINE__, _selectors->get_input_row_count());
+    if (_selectors->get_input_row_count() == 0) {
+        _selectors->reset();
+        return;
+    }
+
+    cql_logger.warn("KQ - {} flush_selectors() result set size: {}, per partition limit: {}, per partition remaining: {}, limit: {}",
+        __LINE__, _result_set->size(), _per_partition_limit, _per_partition_remaining, _limit);
+    // if (_per_partition_remaining) {
+    //     _per_partition_remaining--;
+    //     cql_logger.warn("KQ - {} per partition remaining: {}", __LINE__, _per_partition_remaining);
+    // } else {
+    //     // return;
+    // }
+    if (_result_set->size() < _limit && _per_partition_remaining > 0) {
+        // if (_selectors.size() > _per_partition_limit) {
+        //     cql_logger.warn("KQ result set size exceeds per partition limit: {} > {}",
+        //         _selectors.size(), _per_partition_limit);
+        //     _selectors->resize(_per_partition_limit);q
+        // }
+        cql_logger.warn("KQ - {} add row to result set, result set size: {}, "
+            "_new_partition: {}, _per_partition_remaining: {}, _per_partition_limit: {}",
+            __LINE__, _result_set->size(), _new_partition, _per_partition_remaining, _per_partition_limit);
         _result_set->add_row(_selectors->get_output_row());
         _selectors->reset();
+        _per_partition_remaining--;
+        // if (_new_partition) {
+        //     _new_partition = false;
+        //     _per_partition_remaining = _per_partition_limit;
+        // }
     }
 }
 
 void result_set_builder::complete_row() {
+    cql_logger.warn("KQ - {} complete row, _special_flag_for_last_group: {}", __LINE__, _special_flag_for_last_group);
     if (!_selectors->is_aggregate()) {
         // Fast path when not aggregating
         _result_set->add_row(_selectors->transform_input_row(*this));
         return;
     }
     if (last_group_ended()) {
+        // if (_special_flag_for_last_group) {
+        //     _special_flag_for_last_group = false;
+        //     cql_logger.warn("KQ - {} last group ended, clearing special flag", __LINE__);
+        //     // _selectors->reset();
+        //     current.clear();
+        //     return;
+        // }
+        cql_logger.warn("KQ - {} last group ended", __LINE__);
         flush_selectors();
     }
+    _special_flag_for_last_group = false;
     update_last_group();
+    if (_per_partition_remaining == 0) {
+        cql_logger.warn("KQ - {} per partition remaining is 0", __LINE__);
+        return;
+    }
+    cql_logger.warn("KQ - {} add input row to selectors", __LINE__);
     _selectors->add_input_row(*this);
 }
 
 void result_set_builder::start_new_row() {
+    cql_logger.warn("KQ - {} start new row", __LINE__);
     current.clear();
 }
 
 std::unique_ptr<result_set> result_set_builder::build() {
+    cql_logger.warn("KQ - {} build result set: group began: {}, selectors aggregate: {}",
+        __LINE__, _group_began, _selectors->is_aggregate());
+    // if (_group_began && _selectors->is_aggregate() && !_special_flag_for_last_group) {
     if (_group_began && _selectors->is_aggregate()) {
+        cql_logger.warn("KQ - {} flush selectors", __LINE__);
         flush_selectors();
     }
     if (_result_set->empty() && _selectors->is_aggregate() && _group_by_cell_indices.empty()) {
+        cql_logger.warn("KQ - {} add row to result set, result set size: {}, "
+            "_new_partition: {}, _per_partition_remaining: {}, _per_partition_limit: {}",
+            __LINE__, _result_set->size(), _new_partition, _per_partition_remaining, _per_partition_limit);
         _result_set->add_row(_selectors->get_output_row());
     }
     return std::move(_result_set);
@@ -618,7 +696,8 @@ result_set_builder::restrictions_filter::restrictions_filter(::shared_ptr<const 
         schema_ptr schema,
         uint64_t per_partition_limit,
         std::optional<partition_key> last_pkey,
-        uint64_t rows_fetched_for_last_partition)
+        uint64_t rows_fetched_for_last_partition,
+        bool is_aggregate)
     : _restrictions(restrictions)
     , _options(options)
     , _partition_level_filter(_restrictions->get_partition_level_filter())
@@ -629,16 +708,24 @@ result_set_builder::restrictions_filter::restrictions_filter(::shared_ptr<const 
     , _per_partition_remaining(_per_partition_limit)
     , _rows_fetched_for_last_partition(rows_fetched_for_last_partition)
     , _last_pkey(std::move(last_pkey))
+    , _is_aggregate(is_aggregate)
 { }
 
+static logging::logger rlogger("restrictions_filter");
 bool result_set_builder::restrictions_filter::do_filter(const selection& selection,
                                                          const std::vector<bytes>& partition_key,
                                                          const std::vector<bytes>& clustering_key,
                                                          const query::result_row_view& static_row,
                                                          const query::result_row_view* row) const {
-    static logging::logger rlogger("restrictions_filter");
+    rlogger.warn("KQ - {} do filter, _per_partition_remaining: {}, _per_partition_limit: {}, _current_partition_does_not_match: {}",
+        __LINE__, _per_partition_remaining, _per_partition_limit, _current_partition_does_not_match);
 
-    if (_current_partition_does_not_match || _remaining == 0 || _per_partition_remaining == 0) {
+    rlogger.warn("KQ - {} selection.is_aggregate(): {}", __LINE__, selection.is_aggregate());
+
+    const bool failed_partition_remaining = _per_partition_remaining == 0 && !_is_aggregate;
+
+    if (_current_partition_does_not_match || _remaining == 0 || failed_partition_remaining) {
+        rlogger.warn("KQ - {} return false", __LINE__);
         return false;
     }
 
@@ -654,6 +741,7 @@ bool result_set_builder::restrictions_filter::do_filter(const selection& selecti
                         .options = &_options,
                     })) {
         _current_partition_does_not_match = true;
+        rlogger.warn("KQ - {} partition level filter not satisfied", __LINE__);
         return false;
     }
 
@@ -666,9 +754,11 @@ bool result_set_builder::restrictions_filter::do_filter(const selection& selecti
                         .selection = &selection,
                         .options = &_options,
                     })) {
+        rlogger.warn("KQ - {} clustering row level filter not satisfied", __LINE__);
         return false;
     }
 
+    rlogger.warn("KQ - {} do filter return true", __LINE__);
     return true;
 }
 
@@ -678,13 +768,15 @@ bool result_set_builder::restrictions_filter::operator()(const selection& select
                                                          const query::result_row_view& static_row,
                                                          const query::result_row_view* row) const {
     const bool accepted = do_filter(selection, partition_key, clustering_key, static_row, row);
+    rlogger.warn("KQ - {} operator() accepted: {}", __LINE__, accepted);
     if (!accepted) {
         ++_rows_dropped;
     } else {
         if (_remaining > 0) {
             --_remaining;
         }
-        if (_per_partition_remaining > 0) {
+        if (_per_partition_remaining > 0 && !_is_aggregate) {
+            rlogger.warn("KQ - {} --_per_partition_remaining: {}", __LINE__, _per_partition_remaining);
             --_per_partition_remaining;
         }
     }
@@ -695,10 +787,26 @@ void result_set_builder::restrictions_filter::reset(const partition_key* key) {
     _current_partition_does_not_match = false;
     _rows_dropped = 0;
     _per_partition_remaining = _per_partition_limit;
+    rlogger.warn("KQ - {} reset, _per_partition_remaining: {}, _per_partition_limit: {}",
+        __LINE__, _per_partition_remaining, _per_partition_limit);
+    
+    // if (_is_aggregate && _per_partition_limit > 0) {
+    //     rlogger.warn("KQ - {} reset, decrementing _per_partition_remaining: {}", __LINE__, _per_partition_remaining);
+    //     --_per_partition_remaining;
+    // }
+
+    if (key) {
+        rlogger.warn("KQ - {} reset, key: {}", __LINE__, *key);
+    }
+    if (_last_pkey) {
+        rlogger.warn("KQ - {} reset, last pkey: {}", __LINE__, *_last_pkey);
+    }
     if (_is_first_partition_on_page && _per_partition_limit < std::numeric_limits<decltype(_per_partition_limit)>::max()) {
         // If any rows related to this key were also present in the previous query,
         // we need to take it into account as well.
         if (key && _last_pkey && _last_pkey->equal(*_schema, *key)) {
+            rlogger.warn("KQ - {} reset, _per_partition_remaining {}, _rows_fetched_for_last_partition: {}",
+                __LINE__, _per_partition_remaining, _rows_fetched_for_last_partition);
             _per_partition_remaining -= _rows_fetched_for_last_partition;
         }
         _is_first_partition_on_page = false;
@@ -715,6 +823,14 @@ int32_t result_set_builder::ttl_of(size_t idx) {
 
 size_t result_set_builder::result_set_size() const {
     return _result_set->size();
+}
+
+void result_set_builder::accept_new_partition() {
+    cql_logger.warn("KQ - {} accept new partition", __LINE__);
+    // _new_partition = !_new_partition;
+    flush_selectors();
+    _per_partition_remaining = _per_partition_limit;
+    // --_per_partition_remaining;
 }
 
 bytes_opt result_set_builder::get_value(data_type t, query::result_atomic_cell_view c) {

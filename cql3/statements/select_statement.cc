@@ -390,6 +390,10 @@ select_statement::do_execute(query_processor& qp,
 
     const auto parsed_limit = get_limit(options, _limit);
     const uint64_t inner_loop_limit = get_inner_loop_limit(parsed_limit, _selection->is_aggregate());
+    const auto parsed_per_partition_limit = get_limit(options, _per_partition_limit);
+    const uint64_t inner_loop_per_partition_limit =
+        get_inner_loop_limit(parsed_per_partition_limit, _selection->is_aggregate());
+    logger.warn("KQ - inner_loop_limit: {}, inner_loop_per_partition_limit: {}", inner_loop_limit, inner_loop_per_partition_limit);
     auto now = gc_clock::now();
 
     _stats.filtered_reads += _restrictions_need_filtering;
@@ -494,11 +498,39 @@ select_statement::execute_without_checking_exception_message_aggregate_or_paged(
     command->slice.options.set<query::partition_slice::option::allow_short_read>();
     auto timeout_duration = get_timeout(state.get_client_state(), options);
     auto timeout = db::timeout_clock::now() + timeout_duration;
+    // add PPL restriction to the pager
+
+    logger.warn("KQ - aggreagate: {}, nonpaged_filtering: {}, page_size: {}, limit: {}, per_partition_limit: {}",
+            aggregate, nonpaged_filtering, page_size, limit, _per_partition_limit);
+
+    // uint64_t ppl = _per_partition_limit ? _per_partition_limit.value() : query::max_rows;
+    auto eval_limit = [&] () -> uint64_t {
+        if (!_per_partition_limit) {
+            return query::max_rows;
+        }
+        auto val = expr::evaluate(*_per_partition_limit, options);
+        if (val.is_null()) {
+            return query::max_rows;
+        }
+        auto l = val.view().validate_and_deserialize<int32_t>(*int32_type);
+        if (l <= 0) {
+            return query::max_rows;
+        }
+        return l;
+    };
+    auto ppl = eval_limit();
+
+    command->slice.set_partition_row_limit(ppl);
+    // command->partition_limit = ppl;
+    // command->set_row_limit(ppl);
+    // command->row_limit_low_bits = ppl;
+    command->partition_limit = ppl;
+
     auto p = service::pager::query_pagers::pager(qp.proxy(), _query_schema, _selection,
             state, options, command, std::move(key_ranges), _restrictions_need_filtering ? _restrictions : nullptr);
 
     if (aggregate || nonpaged_filtering) {
-        auto builder = cql3::selection::result_set_builder(*_selection, now, *_group_by_cell_indices, limit);
+        auto builder = cql3::selection::result_set_builder(*_selection, now, *_group_by_cell_indices, limit, ppl);
         coordinator_result<void> result_void = co_await utils::result_do_until(
                 [&p, &builder, limit] {
                     return p->is_exhausted() || (limit < builder.result_set_size());
@@ -916,14 +948,18 @@ select_statement::process_results_complex(foreign_ptr<lw_shared_ptr<query::resul
                                   const query_options& options,
                                   gc_clock::time_point now) const {
     cql3::selection::result_set_builder builder(*_selection, now);
+    logger.warn("KQ - process_results_complex: restrictions_need_filtering: {}, is_reversed: {}",
+            _restrictions_need_filtering, _is_reversed);
     co_return co_await builder.with_thread_if_needed([&] {
         if (_restrictions_need_filtering) {
+            logger.warn("KQ - process_results_complex: restrictions_need_filtering: true");
             results->ensure_counts();
             _stats.filtered_rows_read_total += *results->row_count();
             query::result_view::consume(*results, cmd->slice,
                     cql3::selection::result_set_builder::visitor(builder, *_query_schema,
                             *_selection, cql3::selection::result_set_builder::restrictions_filter(_restrictions, options, cmd->get_row_limit(), _query_schema, cmd->slice.partition_row_limit())));
         } else {
+            logger.warn("KQ - process_results_complex: restrictions_need_filtering: false");
             query::result_view::consume(*results, cmd->slice,
                     cql3::selection::result_set_builder::visitor(builder, *_query_schema,
                             *_selection));
@@ -1897,6 +1933,7 @@ select_statement::select_statement(cf_name cf_name,
     , _group_by_columns(std::move(group_by_columns))
     , _attrs(std::move(attrs))
 {
+    logger.warn("KQ select_statement::select_statement() per partition limit: {}", _per_partition_limit);
     validate_attrs(*_attrs);
 }
 
