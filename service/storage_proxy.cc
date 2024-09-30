@@ -5728,7 +5728,6 @@ storage_proxy::query_singular(lw_shared_ptr<query::read_command> cmd,
         dht::partition_range_vector&& partition_ranges,
         db::consistency_level cl,
         storage_proxy::coordinator_query_options query_options) {
-    slogger.warn("KQ - {} query_singular", __LINE__);
     utils::small_vector<std::pair<::shared_ptr<abstract_read_executor>, dht::token_range>, 1> exec;
     exec.reserve(partition_ranges.size());
 
@@ -5863,9 +5862,6 @@ storage_proxy::query_partition_key_range_concurrent(storage_proxy::clock_type::t
         uint32_t remaining_partition_count,
         replicas_per_token_range preferred_replicas,
         service_permit permit) {
-    slogger.warn("KQ - {} query_partition_key_range_concurrent, "
-        "remaining_row_count: {}, remaining_partition_count: {}",
-        __LINE__, remaining_row_count, remaining_partition_count);
 
     std::vector<foreign_ptr<lw_shared_ptr<query::result>>> results;
     schema_ptr schema = local_schema_registry().get(cmd->schema_version);
@@ -6041,8 +6037,6 @@ storage_proxy::query_partition_key_range_concurrent(storage_proxy::clock_type::t
         result->ensure_counts();
         remaining_row_count -= result->row_count().value();
         remaining_partition_count -= result->partition_count().value();
-        slogger.warn("KQ - {} query_partition_key_range_concurrent, remaining_row_count: {}, "
-            "remaining_partition_count: {}", __LINE__, remaining_row_count, remaining_partition_count);
         results.emplace_back(std::move(result));
         if (ranges_to_vnodes.empty() || !remaining_row_count || !remaining_partition_count) {
             auto used_replicas = replicas_per_token_range();
@@ -6073,8 +6067,6 @@ storage_proxy::query_partition_key_range(lw_shared_ptr<query::read_command> cmd,
         storage_proxy::coordinator_query_options query_options) {
             // partition_row_limit: {}, partition_limit: {}",
         // page_size, _cmd->slice.partition_row_limit(), _cmd->partition_limit);
-    slogger.warn("KQ - {} query_partition_key_range, partition_row_limit: {}, partition_limit: {} ",
-        __LINE__, cmd->slice.partition_row_limit(), cmd->partition_limit);
     schema_ptr schema = local_schema_registry().get(cmd->schema_version);
     replica::table& table = _db.local().find_column_family(schema->id());
     auto erm = table.get_effective_replication_map();
@@ -6090,8 +6082,6 @@ storage_proxy::query_partition_key_range(lw_shared_ptr<query::read_command> cmd,
 
     slogger.debug("Estimated result rows per range: {}; requested rows: {}, concurrent range requests: {}",
             result_rows_per_range, cmd->get_row_limit(), concurrency_factor);
-    slogger.warn("KQ - {} query_partition_key_range, row_limit: {}, partition_limit: {}",
-        __LINE__, cmd->get_row_limit(), cmd->partition_limit);
 
     // The call to `query_partition_key_range_concurrent()` below
     // updates `cmd` directly when processing the results. Under
@@ -6105,8 +6095,6 @@ storage_proxy::query_partition_key_range(lw_shared_ptr<query::read_command> cmd,
     // to the lambda below.
     const auto row_limit = cmd->get_row_limit();
     const auto partition_limit = cmd->partition_limit;
-    slogger.warn("KQ - {} query_partition_key_range, row_limit: {}, "
-        "partition_limit: {}", __LINE__, row_limit, partition_limit);
 
     auto wrapped_result = co_await query_partition_key_range_concurrent(query_options.timeout(*this),
             std::move(erm),
@@ -6157,7 +6145,6 @@ storage_proxy::query_result(schema_ptr query_schema,
     db::consistency_level cl,
     storage_proxy::coordinator_query_options query_options)
 {
-    slogger.warn("KQ - {}", __LINE__);
     if (slogger.is_enabled(logging::log_level::trace) || qlogger.is_enabled(logging::log_level::trace)) {
         static thread_local int next_id = 0;
         auto query_id = next_id++;
@@ -6196,7 +6183,6 @@ storage_proxy::do_query(schema_ptr s,
     db::consistency_level cl,
     storage_proxy::coordinator_query_options query_options)
 {
-    slogger.warn("KQ - {} cmd partition: {}", __LINE__, cmd->slice.partition_row_limit());
     static auto make_empty = [] {
         return make_ready_future<result<coordinator_query_result>>(make_foreign(make_lw_shared<query::result>()));
     };
@@ -6204,22 +6190,18 @@ storage_proxy::do_query(schema_ptr s,
     auto& slice = cmd->slice;
     if (partition_ranges.empty() ||
             (slice.default_row_ranges().empty() && !slice.get_specific_ranges())) {
-        slogger.warn("KQ - {} empty partition_ranges or slice", __LINE__);
         return make_empty();
     }
 
     if (db::is_serial_consistency(cl)) {
-        slogger.warn("KQ - {} do_query_with_paxos", __LINE__);
         auto f = do_query_with_paxos(std::move(s), std::move(cmd), std::move(partition_ranges), cl, std::move(query_options));
         return utils::then_ok_result<result<storage_proxy::coordinator_query_result>>(std::move(f));
     } else {
-        slogger.warn("KQ - {} do_query_without_paxos", __LINE__);
         utils::latency_counter lc;
         lc.start();
         auto p = shared_from_this();
 
         if (query::is_single_partition(partition_ranges[0])) { // do not support mixed partitions (yet?)
-            slogger.warn("KQ - {} query_singular", __LINE__);
             try {
                 return query_singular(cmd,
                         std::move(partition_ranges),
@@ -6232,7 +6214,6 @@ storage_proxy::do_query(schema_ptr s,
                 return make_empty();
             }
         }
-        slogger.warn("KQ - {} query_partition_key_range", __LINE__);
 
         return query_partition_key_range(cmd,
                 std::move(partition_ranges),
@@ -6250,7 +6231,6 @@ storage_proxy::do_query_with_paxos(schema_ptr s,
     dht::partition_range_vector&& partition_ranges,
     db::consistency_level cl,
     storage_proxy::coordinator_query_options query_options) {
-    slogger.warn("KQ - {} do_query_with_paxos", __LINE__);
     if (partition_ranges.size() != 1 || !query::is_single_partition(partition_ranges[0])) {
         return make_exception_future<storage_proxy::coordinator_query_result>(
                 exceptions::invalid_request_exception("SERIAL/LOCAL_SERIAL consistency may only be requested for one partition at a time"));
